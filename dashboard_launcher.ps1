@@ -1,0 +1,2 @@
+Set-Location "C:\my_projects_main\LedgerStream\ledgerstream\ledgerstream\dashboard"
+& python -m streamlit run dashboard.py --server.headless true --server.port 8501 --browser.gatherUsageStats false *> "C:\my_projects_main\LedgerStream\dashboard.log"

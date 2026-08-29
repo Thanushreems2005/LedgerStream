@@ -1,0 +1,75 @@
+# Dependency directories
+**/node_modules/
+jspm_packages/
+web_modules/
+
+# Build and distribution directories
+**/dist/
+**/build/
+out/
+.next/
+.nuxt/
+
+# Logs
+*.log
+api.log
+consumer_all.log
+consumer_err.log
+consumer_out.log
+dashboard.log
+fraud_consumer.log
+fraud_demo.log
+frontend.log
+producer_all.log
+producer_burst.log
+producer_burst2.log
+producer_clean.log
+producer_dlq.log
+ledgerstream/ledgerstream/consumer_error.log
+ledgerstream/ledgerstream/consumer_output.log
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.sample
+*.env
+
+# Local history or temp files
+.history/
+.tmp/
+.temp/
+.cache/
+.eslintcache
+.parcel-cache
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDEs and editors
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.npy
+*.csv
+# fraud_model.pkl is small and needed, so we don't ignore .pkl or we explicitly keep it
+
+
