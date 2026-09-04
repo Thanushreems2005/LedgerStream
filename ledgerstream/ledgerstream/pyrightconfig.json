@@ -1,0 +1,9 @@
+{
+  "extraPaths": [
+    "consumer",
+    "fraud",
+    "producer",
+    "dlq",
+    "loadtest"
+  ]
+}

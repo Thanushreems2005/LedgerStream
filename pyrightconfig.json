@@ -1,0 +1,9 @@
+{
+  "extraPaths": [
+    "ledgerstream/ledgerstream/consumer",
+    "ledgerstream/ledgerstream/fraud",
+    "ledgerstream/ledgerstream/producer",
+    "ledgerstream/ledgerstream/dlq",
+    "ledgerstream/ledgerstream/loadtest"
+  ]
+}

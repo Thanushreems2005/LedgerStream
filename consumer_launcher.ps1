@@ -1,2 +1,4 @@
-Set-Location "C:\my_projects_main\LedgerStream\ledgerstream\ledgerstream\consumer"
-& python -u ledger_consumer.py *> "C:\my_projects_main\LedgerStream\consumer_all.log"
+# Local dev launcher for the ledger consumer (the inline risk engine).
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location (Join-Path $Root "ledgerstream\ledgerstream\consumer")
+& python -u ledger_consumer.py *> (Join-Path $Root "consumer_all.log")

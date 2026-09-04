@@ -1,0 +1,45 @@
+{
+  "model_type": "RandomForestClassifier",
+  "model_version": "V4",
+  "selected_over": "V3 (HistGradientBoostingClassifier) - meaningful PR-AUC and operating-threshold improvement on identical 6-feature contract",
+  "hyperparameters": {
+    "n_estimators": 300,
+    "max_depth": 10,
+    "random_state": 42
+  },
+  "feature_names": [
+    "amount",
+    "hour",
+    "velocity",
+    "log_amount",
+    "is_night",
+    "amount_ratio"
+  ],
+  "n_features": 6,
+  "feature_order": [
+    "amount",
+    "hour",
+    "velocity",
+    "log_amount",
+    "is_night",
+    "amount_ratio"
+  ],
+  "target": "Class",
+  "probability_output": "predict_proba[:, 1]",
+  "split": {
+    "test_size": 0.2,
+    "stratify": "y",
+    "random_state": 42,
+    "n_test": 56962,
+    "n_fraud": 98,
+    "n_non_fraud": 56864
+  },
+  "held_out_metrics": {
+    "auc_pr": 0.1131,
+    "best_f1": 0.257,
+    "best_f1_threshold": 0.0897
+  },
+  "audit_gate": {
+    "expected_auc_pr": 0.1131
+  }
+}

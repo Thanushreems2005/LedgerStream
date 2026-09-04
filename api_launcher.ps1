@@ -1,2 +1,4 @@
-Set-Location "C:\my_projects_main\LedgerStream\ledgerstream\ledgerstream\api"
-& node server.js *> "C:\my_projects_main\LedgerStream\api.log"
+# Local dev launcher for the Express API server.
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location (Join-Path $Root "ledgerstream\ledgerstream\api")
+& node server.js *> (Join-Path $Root "api.log")

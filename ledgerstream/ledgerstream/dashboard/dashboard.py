@@ -12,6 +12,7 @@ Usage:
 """
 
 import json
+import os
 import time
 
 import pandas as pd
@@ -21,8 +22,8 @@ from confluent_kafka import Consumer, TopicPartition
 from confluent_kafka._model import ConsumerGroupTopicPartitions
 from confluent_kafka.admin import AdminClient
 
-BOOTSTRAP_SERVERS = "localhost:9092"
-PG_DSN = "dbname=ledgerstream user=ledger password=ledger host=localhost port=5433"
+BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+PG_DSN = os.environ.get("PG_DSN", "dbname=ledgerstream user=ledger password=ledger host=localhost port=5433")
 
 st.set_page_config(page_title="LedgerStream", layout="wide")
 st.title("LedgerStream — Live Payment Ledger")

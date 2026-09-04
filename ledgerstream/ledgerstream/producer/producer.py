@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import time
 import uuid
@@ -22,10 +23,27 @@ from datetime import datetime, timezone
 
 from confluent_kafka import Producer
 
-TOPIC = "transactions"
-BOOTSTRAP_SERVERS = "localhost:9092"
+TOPIC = os.environ.get("KAFKA_TRANSACTIONS_TOPIC", "transactions")
+BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 
-ACCOUNTS = [f"ACC00{i}" for i in range(1, 9)]
+# Accounts are configurable so the producer keeps working if the account set
+# changes. Defaults mirror the local dev seed (8 accounts).
+DEFAULT_MIN_ACCOUNT = os.environ.get("MIN_ACCOUNT_NUM", "1")
+DEFAULT_MAX_ACCOUNT = os.environ.get("MAX_ACCOUNT_NUM", "8")
+DEFAULT_ACCOUNT_PREFIX = os.environ.get("ACCOUNT_PREFIX", "ACC")
+DEFAULT_MIN_AMOUNT = float(os.environ.get("MIN_AMOUNT", "10"))
+DEFAULT_MAX_AMOUNT = float(os.environ.get("MAX_AMOUNT", "5000"))
+
+
+def build_accounts():
+    """Build the account id list from configuration (dataset-agnostic)."""
+    prefix = DEFAULT_ACCOUNT_PREFIX
+    lo = int(DEFAULT_MIN_ACCOUNT)
+    hi = int(DEFAULT_MAX_ACCOUNT)
+    return [f"{prefix}{i:03d}" for i in range(lo, hi + 1)]
+
+
+ACCOUNTS = build_accounts()
 
 
 def delivery_report(err, msg):
@@ -39,7 +57,7 @@ def make_event(inject_bad_rate: float) -> dict:
         "event_id": str(uuid.uuid4()),
         "from_account": from_acc,
         "to_account": to_acc,
-        "amount": round(random.uniform(10, 5000), 2),
+        "amount": round(random.uniform(DEFAULT_MIN_AMOUNT, DEFAULT_MAX_AMOUNT), 2),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

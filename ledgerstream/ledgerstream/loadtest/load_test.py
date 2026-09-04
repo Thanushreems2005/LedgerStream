@@ -18,6 +18,8 @@ Usage:
 
 import argparse
 import json
+import os
+import random
 import time
 import uuid
 from datetime import datetime, timezone
@@ -27,10 +29,17 @@ from confluent_kafka import Consumer, Producer, TopicPartition
 from confluent_kafka._model import ConsumerGroupTopicPartitions
 from confluent_kafka.admin import AdminClient
 
-BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "transactions"
-PG_DSN = "dbname=ledgerstream user=ledger password=ledger host=localhost port=5433"
-ACCOUNTS = [f"ACC00{i}" for i in range(1, 9)]
+BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+TOPIC = os.environ.get("KAFKA_TRANSACTIONS_TOPIC", "transactions")
+PG_DSN = os.environ.get("PG_DSN", "dbname=ledgerstream user=ledger password=ledger host=localhost port=5433")
+
+# Account and amount ranges are configurable (dataset-agnostic).
+ACCOUNT_PREFIX = os.environ.get("ACCOUNT_PREFIX", "ACC")
+MIN_ACCOUNT_NUM = int(os.environ.get("MIN_ACCOUNT_NUM", "1"))
+MAX_ACCOUNT_NUM = int(os.environ.get("MAX_ACCOUNT_NUM", "8"))
+MIN_AMOUNT = float(os.environ.get("MIN_AMOUNT", "10"))
+MAX_AMOUNT = float(os.environ.get("MAX_AMOUNT", "500"))
+ACCOUNTS = [f"{ACCOUNT_PREFIX}{i:03d}" for i in range(MIN_ACCOUNT_NUM, MAX_ACCOUNT_NUM + 1)]
 
 
 def send_burst(producer: Producer, target_rate: int, duration: int) -> list:
@@ -51,7 +60,7 @@ def send_burst(producer: Producer, target_rate: int, duration: int) -> list:
                 "event_id": event_id,
                 "from_account": from_acc,
                 "to_account": to_acc,
-                "amount": round(random.uniform(10, 500), 2),
+                "amount": round(random.uniform(MIN_AMOUNT, MAX_AMOUNT), 2),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             producer.produce(TOPIC, key=from_acc.encode(), value=json.dumps(event).encode())

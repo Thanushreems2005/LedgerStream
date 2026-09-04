@@ -1,0 +1,149 @@
+"""
+LedgerStream V3 Fraud Model Training (persisted artifact)
+
+Trains the validated V3 model: a scikit-learn HistGradientBoostingClassifier
+over the six production-servable features defined in ``features.py``:
+
+    [amount, hour, velocity, log_amount, is_night, amount_ratio]
+
+It uses the SAME held-out split as the audit
+(train_test_split(test_size=0.2, stratify=y, random_state=42)) and verifies
+the reproduced held-out metrics before persisting. It writes both the model
+artifact (pickle) and a sidecar metadata JSON.
+
+Usage:
+    python train_model_v3.py
+"""
+
+import json
+import pickle
+
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import average_precision_score, precision_recall_curve
+from sklearn.model_selection import train_test_split
+
+from features import FEATURE_NAMES, build_features_v3
+
+DATA_PATH = "creditcard.csv"
+MODEL_OUT = "fraud_model_v3.pkl"
+METADATA_OUT = "fraud_model_v3.metadata.json"
+
+# Hyper-parameters from the validated audit.
+N_ITER = 300
+MAX_DEPTH = 5
+LEARNING_RATE = 0.05
+RANDOM_STATE = 42
+
+# Expected held-out results from the audit (used as a sanity gate).
+EXPECTED_N_TEST = 56962
+EXPECTED_N_FRAUD = 98
+EXPECTED_AUCPR = 0.0637
+
+
+def _find_best_f1(probs, y_true):
+    precision, recall, thresholds = precision_recall_curve(y_true, probs)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f1 = np.where(
+            (precision + recall) > 0,
+            2 * precision * recall / (precision + recall),
+            0.0,
+        )
+    best = int(np.argmax(f1))
+    thr = thresholds[best] if best < len(thresholds) else thresholds[-1]
+    return thr, precision[best], recall[best], f1[best]
+
+
+def main():
+    df = pd.read_csv(DATA_PATH)
+    y = df["Class"]
+    print(f"loaded {len(df)} rows, fraud rate = {y.mean():.4%}")
+
+    X = build_features_v3(df)
+    assert list(X.columns) == FEATURE_NAMES, (list(X.columns), FEATURE_NAMES)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
+
+    n_test = len(y_test)
+    n_fraud = int(y_test.sum())
+    n_non = n_test - n_fraud
+    print(f"\nTest samples:  {n_test} "
+          f"(fraud {n_fraud}, non-fraud {n_non}, rate {n_fraud / n_test:.4%})")
+    if n_test != EXPECTED_N_TEST or n_fraud != EXPECTED_N_FRAUD:
+        raise SystemExit(
+            f"split mismatch: got {n_test}/{n_fraud}, "
+            f"expected {EXPECTED_N_TEST}/{EXPECTED_N_FRAUD}"
+        )
+
+    model = HistGradientBoostingClassifier(
+        max_iter=N_ITER,
+        max_depth=MAX_DEPTH,
+        learning_rate=LEARNING_RATE,
+        random_state=RANDOM_STATE,
+    )
+    # Fit on a positional numpy array (column order == FEATURE_NAMES) so the
+    # persisted model does not expect DataFrame column names at serve time,
+    # where consumers pass a raw numpy feature vector.
+    model.fit(X_train.to_numpy(), y_train)
+
+    probs = model.predict_proba(X_test.to_numpy())[:, 1]
+    aucpr = average_precision_score(y_test, probs)
+    best_thr, bp, br, bf1 = _find_best_f1(probs, y_test)
+
+    print(f"\nV3 AUC-PR:     {aucpr:.4f}  (audit 0.0637)")
+    print(f"V3 best-F1:    thr={best_thr:.4f} P={bp:.4f} R={br:.4f} F1={bf1:.4f}")
+    print(f"               (audit thr=0.1018 F1=0.1806)")
+
+    for thr in (0.01, 0.05, 0.10, 0.50):
+        flag = probs > thr
+        prec = flag.sum() == 0 and 0.0 or (y_test[flag].sum() / flag.sum())
+        rec = y_test[flag].sum() / n_fraud
+        print(f"  @{thr:<.2f} prec={prec:.4f} rec={rec:.4f} flag%={(flag.sum() / n_test) * 100:.2f}%")
+
+    if abs(aucpr - EXPECTED_AUCPR) > 0.005:
+        print("WARNING: AUC-PR deviates from audit; not persisting.")
+        return
+
+    with open(MODEL_OUT, "wb") as f:
+        pickle.dump(model, f)
+
+    metadata = {
+        "model_type": "HistGradientBoostingClassifier",
+        "hyperparameters": {
+            "max_iter": N_ITER,
+            "max_depth": MAX_DEPTH,
+            "learning_rate": LEARNING_RATE,
+            "random_state": RANDOM_STATE,
+        },
+        "feature_names": FEATURE_NAMES,
+        "n_features": len(FEATURE_NAMES),
+        "feature_order": FEATURE_NAMES,
+        "target": "Class",
+        "probability_output": "predict_proba[:, 1]",
+        "split": {
+            "test_size": 0.2,
+            "stratify": "y",
+            "random_state": 42,
+            "n_test": n_test,
+            "n_fraud": n_fraud,
+            "n_non_fraud": n_non,
+        },
+        "held_out_metrics": {
+            "auc_pr": round(aucpr, 4),
+            "best_f1": round(bf1, 4),
+            "best_f1_threshold": round(best_thr, 4),
+        },
+        "audit_gate": {"expected_auc_pr": EXPECTED_AUCPR},
+    }
+    with open(METADATA_OUT, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"\nsaved model to {MODEL_OUT}")
+    print(f"saved metadata to {METADATA_OUT}")
+
+
+if __name__ == "__main__":
+    main()

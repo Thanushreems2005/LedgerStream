@@ -4,58 +4,86 @@ LedgerStream Fraud Consumer (Day 5, part 2)
 Reads the SAME `transactions` topic as the ledger consumer, but as its own
 independent consumer group (`fraud-consumer-group`). Kafka delivers a full
 copy of the stream to each consumer group, so this runs in parallel with
-zero interference - if this process crashes, ledger processing is
-unaffected, and vice versa. That independence is the point: worth calling
-out explicitly in interviews.
-
-Feature engineering note (read train_model.py's docstring for the full
-explanation): the Kaggle model was trained on real swipe-data PCA features
-that don't exist on a synthetic transfer event. Rather than faking those
-28 features, this consumer builds a small, honest feature vector from
-things the event actually has - amount, hour-of-day, and the sender's
-rolling transaction count in the last N events (a simple velocity signal,
-recomputed in-memory here; a production version would keep this in Redis).
-Padding to the model's expected input width with zeros is a known
-simplification - call it out as exactly that in interviews, don't oversell it.
-
-Risk decision layer (Day 1): every scored event gets a decision band derived
-only from the risk_score - LOW/APPROVE, MEDIUM/VERIFY, HIGH/HOLD - plus a
-human-readable `reasons[]` array built ONLY from amount, hour, and velocity
-(the 3 real features). If nothing stands out it says so plainly; no
-fabricated explanations. Alerts (score >= threshold) carry all of it.
-
-Validity gate: before scoring, the event must pass the same basic payment
-validity check the ledger consumer uses (required fields, from != to,
-amount > 0). Malformed / DLQ-bound events are skipped WITHOUT a risk
-decision - scoring them would misrepresent what the model protects against.
-
-Usage:
-    python fraud_consumer.py --threshold 0.7
+zero interference.
 """
 
 import argparse
 import json
+import logging
+import os
 import pickle
+import sys
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 from confluent_kafka import Consumer, KafkaException, Producer
 
-BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "transactions"
-ALERTS_TOPIC = "fraud-alerts"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [fraud] %(message)s")
+log = logging.getLogger(__name__)
+
+# --- Environment Configurations (Step 3) -----------------------------------
+def load_env_file():
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
+    if not os.path.exists(path):
+        path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
+    if not os.path.exists(path):
+        path = ".env"
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    os.environ[k] = v
+
+load_env_file()
+
+BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+TOPIC = os.environ.get("KAFKA_TRANSACTIONS_TOPIC", "transactions")
+ALERTS_TOPIC = os.environ.get("KAFKA_ALERTS_TOPIC", "fraud-alerts")
 GROUP_ID = "fraud-consumer-group"
-MODEL_PATH = "fraud_model.pkl"
 
-VELOCITY_WINDOW = 20  # last N transactions per account, kept in memory
+MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "fraud_model.pkl"))
+if not os.path.exists(MODEL_PATH):
+    MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fraud", "fraud_model.pkl"))
 
-# --- Risk decision bands (threshold of the fraud-alerts gate) ------------
-# Risky => the higher bands are read-only observability for every event;
-# only scores >= threshold emit to the fraud-alerts topic.
-LOW_CAP = 0.50          # score < 0.50  -> LOW/APPROVE
-VERIFY_CAP = 0.96       # 0.50 <= score < 0.96 -> MEDIUM/VERIFY (default threshold)
-# score >= 0.96 -> HIGH/HOLD
+# Same business-policy thresholds as the ledger consumer. Both consumers read
+# from the same central configuration so the risk classification is identical.
+LOW_CAP = float(os.environ.get("RISK_LOW_THRESHOLD", "0.01"))
+VERIFY_CAP = float(os.environ.get("RISK_HIGH_THRESHOLD", "0.10"))
+
+if not (0.0 <= LOW_CAP < VERIFY_CAP <= 1.0):
+    raise ValueError(f"Invalid risk threshold configuration: LOW_CAP={LOW_CAP}, VERIFY_CAP={VERIFY_CAP}")
+
+
+# --- V3 shared feature contract (six features) ------------------------------
+from features import build_feature_vector as _v3_build_feature_vector  # noqa: E402
+from features import SERVE_HISTORY_CAP  # noqa: E402
+from features import VELOCITY_WINDOW_SECONDS  # noqa: E402
+
+VELOCITY_WINDOW = 20  # last N transactions per account (legacy label, unused for scoring)
+
+
+# --- Structured Logging Helper (Step 2) ------------------------------------
+def log_structured_event(event_type: str, event_id: str, amount: float, sender: str, receiver: str, score: float | None = None, risk_level: str = "", decision: str = "", status: str = "", reason: str = ""):
+    log_obj = {
+        "event_type": event_type,
+        "event_id": event_id,
+        "amount": amount,
+        "sender": sender,
+        "receiver": receiver,
+        "risk_score": round(score, 4) if score is not None else None,
+        "risk_level": risk_level,
+        "decision": decision,
+        "status": status,
+        "error_reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    log.info("[JSON_EVENT] %s", json.dumps(log_obj))
+
 
 # --- Reason heuristics: honestly derived from the event's OWN data only ---
 LATE_NIGHT_HOUR_MIN = 6      # 06:00 UTC and later is a normal business hour
@@ -67,25 +95,36 @@ VELOCITY_BURST_THRESHOLD = 10  # events seen for the sender in VELOCITY_WINDOW
 
 
 def load_model():
-    with open(MODEL_PATH, "rb") as f:
+    path = MODEL_PATH
+    if not os.path.exists(path):
+        path = "fraud_model.pkl"
+    if not os.path.exists(path):
+        path = os.path.join("fraud", "fraud_model.pkl")
+    if not os.path.exists(path):
+        path = os.path.join("..", "fraud", "fraud_model.pkl")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Model file not found at expected paths.")
+    with open(path, "rb") as f:
         return pickle.load(f)
 
 
 def decide_risk(score: float):
-    """Map the model's risk score to a business decision band."""
+    """Map the model's risk score to a business decision band.
+
+    Matches the ledger consumer's inclusive semantics so the two consumers
+    agree at the boundary:
+        score <  LOW_CAP           -> LOW     (APPROVE)
+        score <= VERIFY_CAP        -> MEDIUM  (VERIFY)
+        otherwise                  -> HIGH    (HOLD)
+    """
     if score < LOW_CAP:
         return "LOW", "APPROVE"
-    if score < VERIFY_CAP:
+    if score <= VERIFY_CAP:
         return "MEDIUM", "VERIFY"
     return "HIGH", "HOLD"
 
 
 def validate_event(event: dict) -> str | None:
-    """Mirror of the ledger consumer's validity check (ledger_consumer.py
-    `validate()`): required fields present, from != to, amount > 0.
-
-    Returns an error reason string if invalid, else None. `timestamp` is
-    additionally required here because scoring needs it."""
     required = ("event_id", "from_account", "to_account", "amount", "timestamp")
     for field in required:
         if field not in event:
@@ -98,11 +137,6 @@ def validate_event(event: dict) -> str | None:
 
 
 def build_reasons(event: dict, history, velocity: int) -> list:
-    """Explain the decision using ONLY amount, hour, and velocity.
-
-    Heuristic thresholds are fixed here and deliberately modest; if nothing
-    stands out we say exactly that - no invented explanations.
-    """
     ts = datetime.fromisoformat(event["timestamp"])
     hour = ts.hour
     amount = float(event["amount"])
@@ -128,47 +162,63 @@ def build_reasons(event: dict, history, velocity: int) -> list:
     return reasons
 
 
-def build_feature_vector(event: dict, velocity: int, expected_width: int) -> np.ndarray:
-    ts = datetime.fromisoformat(event["timestamp"])
-    hour = ts.hour
-    amount = event["amount"]
-
-    engineered = np.array([amount, hour, velocity], dtype=float)
-    padding = np.zeros(max(expected_width - len(engineered), 0))
-    features = np.concatenate([engineered, padding])[:expected_width].reshape(1, -1)
+def build_feature_vector(event: dict, history, expected_width: int) -> np.ndarray:
+    """Six V3 features via the shared builder; validates width against the model."""
+    features = _v3_build_feature_vector(event, history)
+    if features.shape[1] != expected_width:
+        raise ValueError(
+            f"feature contract mismatch: model expects {expected_width} features, "
+            f"features.py produced {features.shape[1]}"
+        )
     return features
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    # Threshold chosen from held-out PR-curve analysis: max F1 for the fraud
-    # class on the retrained 3-feature model is at thr=0.96 (P=0.21, R=0.15).
-    # Known limitation (do NOT oversell): AUC-PR=0.0488 and fraud-class
-    # precision ~0.007@thr=0.5 on this 3-feature model - the Kaggle PCA
-    # features that carried the real signal don't exist on ledger transfers.
-    parser.add_argument("--threshold", type=float, default=0.96,
-                         help="risk score above which a transaction is flagged")
-    args = parser.parse_args()
-
     model = load_model()
     expected_width = model.n_features_in_
 
-    consumer = Consumer({
+    consumer_opts = {
         "bootstrap.servers": BOOTSTRAP_SERVERS,
         "group.id": GROUP_ID,
         "auto.offset.reset": "earliest",
         "enable.auto.commit": True,  # scoring is not the source of truth; simple auto-commit is fine here
-    })
+    }
+    producer_opts = {
+        "bootstrap.servers": BOOTSTRAP_SERVERS,
+    }
+
+    sasl_user = os.environ.get("KAFKA_SASL_USERNAME")
+    sasl_pass = os.environ.get("KAFKA_SASL_PASSWORD")
+
+    if sasl_user and sasl_pass:
+        sasl_config = {
+            "security.protocol": "SASL_SSL",
+            "sasl.mechanisms": "SCRAM-SHA-256",
+            "sasl.username": sasl_user,
+            "sasl.password": sasl_pass,
+        }
+        ca_cert_content = os.environ.get("KAFKA_CA_CERT")
+        if ca_cert_content:
+            ca_cert_content = ca_cert_content.replace("\\n", "\n")
+            ca_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "ca.pem"))
+            with open(ca_path, "w") as f:
+                f.write(ca_cert_content)
+            sasl_config["ssl.ca.location"] = ca_path
+            sasl_config["enable.ssl.certificate.verification"] = "true"
+        else:
+            if os.environ.get("NODE_ENV") == "production":
+                raise ValueError("FATAL: KAFKA_CA_CERT is required for secure Aiven Kafka TLS in production.")
+            sasl_config["enable.ssl.certificate.verification"] = "false"
+        consumer_opts.update(sasl_config)
+        producer_opts.update(sasl_config)
+
+    consumer = Consumer(consumer_opts)
     consumer.subscribe([TOPIC])
 
-    alert_producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
-    recent_by_account = defaultdict(lambda: deque(maxlen=VELOCITY_WINDOW))
+    alert_producer = Producer(producer_opts)
+    recent_by_account = defaultdict(lambda: deque(maxlen=SERVE_HISTORY_CAP))
 
-    band_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
-    processed = 0
-    alert_count = 0
-
-    print(f"[fraud] consumer started, group={GROUP_ID}, threshold={args.threshold}")
+    log.info("fraud consumer started, group=%s", GROUP_ID)
     try:
         while True:
             msg = consumer.poll(1.0)
@@ -177,51 +227,54 @@ def main():
             if msg.error():
                 raise KafkaException(msg.error())
 
+            raw_value = msg.value()
+            if raw_value is None:
+                continue
             try:
-                event = json.loads(msg.value())
+                event = json.loads(raw_value)
             except json.JSONDecodeError:
                 continue  # malformed events are the ledger consumer's / DLQ's problem, not ours
 
             invalid = validate_event(event)
             if invalid:
-                # Malformed / DLQ-bound event: NOT a real payment risk case.
-                # Skip scoring entirely - no risk decision, no alert - so the
-                # model output isn't skewed by events it was never meant to
-                # protect against. (The ledger consumer routes these to the DLQ.)
-                print(
-                    f"[fraud] SKIP event={event.get('event_id')} "
-                    f"reason={invalid} (malformed, not scored)"
-                )
+                log.warning("validation failed event_id=%s reason=%s", event.get("event_id"), invalid)
                 continue
 
+            event_id = event["event_id"]
             account = event["from_account"]
+            to_acc = event["to_account"]
+            amount = event["amount"]
+            
+            log_structured_event("TRANSACTION_RECEIVED", event_id, amount, account, to_acc)
+
             history = recent_by_account[account]
             history.append((event["timestamp"], event["amount"]))
-            velocity = len(history)
+
+            # Velocity for reason text = count in the 30-minute time window.
+            cutoff = datetime.fromisoformat(event["timestamp"]) - timedelta(seconds=VELOCITY_WINDOW_SECONDS)
+            velocity = sum(
+                1 for (ts_str, _) in history
+                if datetime.fromisoformat(ts_str) >= cutoff
+            )
 
             try:
-                features = build_feature_vector(event, velocity, expected_width)
+                features = build_feature_vector(event, history, expected_width)
                 score = float(model.predict_proba(features)[0, 1])
             except Exception as e:
-                print(f"[fraud] scoring error for event {event.get('event_id')}: {e}")
+                log.warning("scoring error for event_id=%s reason=%s", event_id, e)
                 continue
 
             risk_level, action = decide_risk(score)
             reasons = build_reasons(event, history, velocity)
-            band_counts[risk_level] += 1
-            processed += 1
 
-            print(
-                f"[fraud] event={event['event_id']} score={score:.3f} "
-                f"level={risk_level} action={action} reasons={reasons}"
-            )
+            log_structured_event("RISK_SCORED", event_id, amount, account, to_acc, score, risk_level, action)
 
-            if score >= args.threshold:
+            if score >= LOW_CAP:  # publish both MEDIUM and HIGH alerts (LOW_CAP is the low threshold)
                 alert = {
-                    "event_id": event["event_id"],
+                    "event_id": event_id,
                     "from_account": account,
-                    "to_account": event.get("to_account"),
-                    "amount": event["amount"],
+                    "to_account": to_acc,
+                    "amount": amount,
                     "risk_score": round(score, 4),
                     "risk_level": risk_level,
                     "action": action,
@@ -234,18 +287,12 @@ def main():
                     value=json.dumps(alert).encode("utf-8"),
                 )
                 alert_producer.poll(0)
-                alert_count += 1
-                print(f"[fraud] ALERT event_id={event['event_id']} score={score:.3f} action={action}")
-
-            if processed and processed % 200 == 0:
-                print(
-                    f"[fraud] tallies after {processed} events: "
-                    f"LOW={band_counts['LOW']} MEDIUM={band_counts['MEDIUM']} "
-                    f"HIGH={band_counts['HIGH']} alerts={alert_count}"
-                )
+                
+                log_structured_event("TRANSACTION_HELD" if risk_level == "MEDIUM" else "TRANSACTION_BLOCKED",
+                                     event_id, amount, account, to_acc, score, risk_level, action)
 
     except KeyboardInterrupt:
-        print("\n[fraud] shutting down...")
+        log.info("shutting down...")
     finally:
         alert_producer.flush()
         consumer.close()

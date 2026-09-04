@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS transactions_log (
     amount        NUMERIC(15, 2) NOT NULL,
     status        VARCHAR(16) NOT NULL,        -- 'applied' | 'failed' | 'dlq'
     error_reason  TEXT,
+    risk_score    NUMERIC(5, 4),
+    risk_level    VARCHAR(16),
+    reasons       VARCHAR(256),
     created_at    TIMESTAMP NOT NULL DEFAULT now()
 );
 

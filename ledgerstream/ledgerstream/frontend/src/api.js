@@ -1,4 +1,4 @@
-const API_BASE = "/api";
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 async function get(path) {
   const res = await fetch(`${API_BASE}${path}`);
@@ -6,8 +6,10 @@ async function get(path) {
   return res.json();
 }
 
+
 export const fetchBalances = () => get("/balances");
 export const fetchTransactions = (limit = 50) => get(`/transactions?limit=${limit}`);
 export const fetchAlerts = () => get("/alerts");
 export const fetchLag = () => get("/lag");
 export const fetchStats = () => get("/stats");
+export const fetchConfig = () => get("/config");

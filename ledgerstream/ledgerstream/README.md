@@ -32,8 +32,8 @@ cd fraud
 # download creditcard.csv from Kaggle into this folder first:
 # https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
 pip install pandas scikit-learn xgboost
-python train_model.py
-python fraud_consumer.py            # default threshold 0.96 (see limitation below)
+python train_model_v3.py            # trains + persists the V3 HistGradientBoosting model
+python fraud_consumer.py            # defaults: LOW=0.01 / HIGH=0.10 (see .env)
 
 # 6. Dashboard (Day 6)
 cd dashboard && pip install streamlit pandas psycopg2-binary
@@ -81,35 +81,36 @@ PCA features (`V1..V28`) that contain essentially all of the model's fraud
 signal. LedgerStream's synthetic transfer events don't carry those features
 (they're an account-to-account ledger, not card swipes), so the original
 pipeline zero-padded them and **could never exceed a ~0.01 risk score** — no
-alert would ever fire. The consumer was therefore retrained on the 3
-features a transfer event actually has: `amount`, `hour-of-day`, and the
-sender's rolling `velocity` (20-event window), using the *real* Kaggle
-`Class` labels. This makes alerts mechanically possible but at real cost.
+alert would ever fire. The consumer was therefore retrained on the 6
+features a transfer event actually has: `amount`, `hour-of-day`, the
+sender's rolling `velocity` (30-min window), `log_amount`, `is_night`, and
+`amount_ratio`, using the *real* Kaggle `Class` labels. This makes alerts
+mechanically possible but at real cost.
 
 **Evaluated models, side by side** (held-out 20% stratified split):
 
 | Model | Fraud precision | Fraud recall | AUC-PR |
 |------|----------------|--------------|--------|
 | Original (28 PCA features, padded/zeroed at serve time) | 0.722 | 0.847 | 0.8634 |
-| Retrained (amount/hour/velocity — actually servable) | 0.007 @ thr 0.5 | 0.602 | 0.0488 |
+| Retrained V3 (6 features — actually servable) | 0.237 @ thr 0.10 | 0.143 | 0.0637 |
 
 The padded model looks great on paper but is useless at serve time (it can't
-score the stream above 0.01). The 3-feature model can run on real events but
-is a weak classifier — the amount/velocity outliers that fraud rows share
+score the stream above 0.01). The 6-feature V3 model can run on real events
+but is a weak classifier — the amount/velocity outliers that fraud rows share
 overlap heavily with normal traffic.
 
-**Chosen threshold.** Default is `--threshold 0.96`, selected as the
-F1-maximizing cutoff on the held-out PR curve (P≈0.21, R≈0.15, F1≈0.18).
-Alternatives, all on the same held-out split:
-- thr 0.70 → P=0.012, R=0.439 (maximize recall; floods the alert topic
-  with ~3.5k false positives per 98 true frauds)
-- thr 0.90 → P=0.073, R=0.194 (middle ground)
-- thr 0.96 → P=0.206, R=0.153 (max F1, chosen default)
-- thr 0.98 → P=0.233, R=0.071 (maximize precision; misses most fraud)
+**Chosen thresholds.** `RISK_LOW_THRESHOLD=0.01` / `RISK_HIGH_THRESHOLD=0.10`
+by default. The HIGH band sits near the held-out F1-maximizing cutoff
+(thr 0.1018 → P≈0.246, R≈0.143, F1≈0.18) while keeping the flag rate low.
+Alternatives, all on the same held-out split (V3 scores):
+- thr 0.01 → P=0.044, R=0.296 (captures more fraud; ~1.16% flagged)
+- thr 0.05 → P=0.165, R=0.153 (~0.16% flagged)
+- thr 0.10 → P=0.237, R=0.143 (~0.10% flagged, chosen HIGH default)
+- thr 0.50 → P=0.300, R=0.031 (maximize precision; misses most fraud)
 
-0.96 was chosen because precision is the metric that matters most in a
+The 0.10 HIGH threshold was chosen because precision that matters most in a
 fraud-alert topic — every false positive is a human analyst's wasted time —
-while keeping F1-optimal joint performance.
+while keeping a bounded flag rate and the F1-optimal joint performance.
 
 **What a real fix requires.** Either (a) synthetic-labeled ledger fraud data
 (events you control, labeled, in the same shape as the live stream) so the

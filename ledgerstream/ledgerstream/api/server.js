@@ -33,17 +33,14 @@ app.use(
 );
 app.use(express.json());
 
-// Serve static assets from Express public folder or frontend/dist
-const staticDir = fs.existsSync(path.join(__dirname, "public"))
-  ? path.join(__dirname, "public")
-  : path.join(__dirname, "../frontend/dist");
-app.use(express.static(staticDir));
+// Serve static assets from Express public folder
+app.use(express.static(path.join(__dirname, "public")));
 
 const MAX_LIMIT = 200;
 
 // --- Centralized risk policy (single source of truth for the backend) ------
 const RISK_LOW_THRESHOLD = Number(process.env.RISK_LOW_THRESHOLD || 0.01);
-const RISK_HIGH_THRESHOLD = Number(process.env.RISK_HIGH_THRESHOLD || 0.05);
+const RISK_HIGH_THRESHOLD = Number(process.env.RISK_HIGH_THRESHOLD || 0.10);
 if (!(RISK_LOW_THRESHOLD >= 0 && RISK_LOW_THRESHOLD < RISK_HIGH_THRESHOLD && RISK_HIGH_THRESHOLD <= 1)) {
   throw new Error(`Invalid risk threshold configuration: ${RISK_LOW_THRESHOLD}, ${RISK_HIGH_THRESHOLD}`);
 }
@@ -169,6 +166,15 @@ app.get("/api/stats", async (_req, res) => {
       }
     });
 
+    // Backend-derived aggregate from PostgreSQL (single source of truth).
+    // The frontend uses these to display blocked count and blocked value so
+    // the figures are never limited by the transactions-list page size.
+    const blockedValueRes = await pool.query(
+      "SELECT COALESCE(SUM(amount), 0) AS value, COUNT(*) AS count FROM transactions_log WHERE status = 'blocked'"
+    );
+    const blockedValue = Number(blockedValueRes.rows[0].value);
+    const blockedDbCount = Number(blockedValueRes.rows[0].count);
+
     const levels = getLevelCounts();
     res.json({
       ok: true,
@@ -178,6 +184,8 @@ app.get("/api/stats", async (_req, res) => {
       appliedCount: counts.applied,
       heldCount: counts.held,
       blockedCount: counts.blocked,
+      blockedValue,
+      blockedDbCount,
       declinedCount: counts.declined,
       threshold: RISK_HIGH_THRESHOLD,
     });
@@ -355,11 +363,13 @@ app.post("/api/admin/seed-demo", async (req, res) => {
     producer = kafka.producer();
     await producer.connect();
 
-    // Fetch valid sender/receiver accounts from the database so the demo always
-    // uses real accounts regardless of the dataset/account structure.
-    const { rows } = await pool.query("SELECT account_id FROM accounts");
-    const accountIds = rows.map((r) => r.account_id);
-    if (accountIds.length < 2) {
+    // Fetch accounts with their CURRENT available balances so every generated
+    // amount is financially plausible and never exceeds the sender's balance.
+    const { rows } = await pool.query(
+      "SELECT account_id, balance FROM accounts ORDER BY account_id"
+    );
+    const accounts = rows.map((r) => ({ id: r.account_id, balance: Number(r.balance) }));
+    if (accounts.length < 2) {
       throw new Error("At least 2 accounts are required to seed demo transactions");
     }
 
@@ -370,22 +380,39 @@ app.post("/api/admin/seed-demo", async (req, res) => {
 
     const events = [];
     const now = Date.now();
-    for (let i = 0; i < count; i++) {
-      // Random sender/receiver distinct accounts
-      const fromAcc = accountIds[Math.floor(Math.random() * accountIds.length)];
-      let toAcc = accountIds[Math.floor(Math.random() * accountIds.length)];
-      while (toAcc === fromAcc) {
-        toAcc = accountIds[Math.floor(Math.random() * accountIds.length)];
+    // Guard against attempts when no sender can fund a (min) valid amount.
+    const minAmount = Math.max(Number(DEMO_MIN_AMOUNT) || 0, 0.01);
+    const maxAttempts = Math.max(count * 20, 100);
+    for (let attempt = 0; attempt < maxAttempts && events.length < count; attempt++) {
+      // Only senders whose available balance can at least cover DEMO_MIN_AMOUNT
+      const eligible = accounts.filter((a) => a.balance >= minAmount);
+      if (eligible.length === 0) {
+        console.warn(
+          "[api] No sender account has enough balance to satisfy DEMO_MIN_AMOUNT; skipping remaining events"
+        );
+        break;
       }
-      // Random amount within the configured demo range
+      const sender = eligible[Math.floor(Math.random() * eligible.length)];
+
+      // Amount must never exceed the sender's available balance; cap at max.
+      const upperBound = Math.min(Number(DEMO_MAX_AMOUNT) || minAmount, sender.balance);
+      if (upperBound < minAmount) {
+        continue; // no valid amount for this sender; try another
+      }
       const amount = Math.round(
-        (DEMO_MIN_AMOUNT + Math.random() * (DEMO_MAX_AMOUNT - DEMO_MIN_AMOUNT)) * 100
+        (minAmount + Math.random() * (upperBound - minAmount)) * 100
       ) / 100;
+
+      // Random receiver distinct from the sender (any real account)
+      let toAcc = accounts[Math.floor(Math.random() * accounts.length)].id;
+      while (toAcc === sender.id) {
+        toAcc = accounts[Math.floor(Math.random() * accounts.length)].id;
+      }
       // Realistic timestamp: random offset over the past 24 hours
       const ts = new Date(now - Math.floor(Math.random() * 24 * 60 * 60 * 1000));
       const event = {
         event_id: `demo-${crypto.randomUUID()}`,
-        from_account: fromAcc,
+        from_account: sender.id,
         to_account: toAcc,
         amount: Number(amount.toFixed(2)),
         timestamp: ts.toISOString().replace(/Z$/, "+00:00"),
@@ -456,10 +483,7 @@ process.on("SIGINT", shutdown);
 // wildcard route to serve index.html for React SPA
 app.get("*", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
-  const indexPath = fs.existsSync(path.join(__dirname, "public", "index.html"))
-    ? path.join(__dirname, "public", "index.html")
-    : path.join(__dirname, "../frontend/dist", "index.html");
-  res.sendFile(indexPath);
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 async function main() {

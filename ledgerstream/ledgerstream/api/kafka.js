@@ -1,11 +1,37 @@
 const { Kafka } = require("kafkajs");
 
-const broker = process.env.KAFKA_BROKER || "localhost:9092";
+const broker = process.env.KAFKA_BOOTSTRAP_SERVERS || process.env.KAFKA_BROKER || "localhost:9092";
+const saslUsername = process.env.KAFKA_SASL_USERNAME;
+const saslPassword = process.env.KAFKA_SASL_PASSWORD;
 
-const kafka = new Kafka({
+const kafkaConfig = {
   clientId: "ledgerstream-api-mirror",
   brokers: [broker],
-});
+};
+
+if (saslUsername && saslPassword) {
+  if (process.env.KAFKA_CA_CERT) {
+    kafkaConfig.ssl = {
+      rejectUnauthorized: true,
+      ca: [process.env.KAFKA_CA_CERT.replace(/\\n/g, '\n')]
+    };
+  } else {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("FATAL: KAFKA_CA_CERT is required for secure Aiven Kafka TLS in production.");
+    }
+    kafkaConfig.ssl = {
+      rejectUnauthorized: false
+    };
+  }
+  kafkaConfig.sasl = {
+    mechanism: "scram-sha-256",
+    username: saslUsername,
+    password: saslPassword,
+  };
+}
+
+const kafka = new Kafka(kafkaConfig);
+
 
 //
 // Alerts reader — a long-lived, read-only consumer in its OWN consumer
@@ -84,8 +110,8 @@ async function startAlertsReader() {
   // Session epoch: an explicit ALERTS_EPOCH (ISO string or epoch ms) wins,
   // otherwise the API's own boot instant.
   const override = process.env.ALERTS_EPOCH;
-  EPOCH = override ? Date.parse(override) : Date.now();
-  if (!Number.isFinite(EPOCH)) EPOCH = Date.now();
+  EPOCH = override ? Date.parse(override) : (Date.now() - 24 * 60 * 60 * 1000); // default to last 24 hours so alerts survive API restarts
+  if (!Number.isFinite(EPOCH)) EPOCH = Date.now() - 24 * 60 * 60 * 1000;
 
   const consumer = kafka.consumer({
     groupId,

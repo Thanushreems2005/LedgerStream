@@ -8,24 +8,31 @@ import {
   fetchConfig,
 } from "./api";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
 const POLL_MS = 2500;
-const PAGES = ["Overview", "Live Transactions", "Review Queue", "Blocked", "Analytics", "Accounts", "System Health"];
-const PAGE_ICONS = ["◈", "↯", "⏸", "⊗", "◎", "◉", "⚙"];
+
+const NAV = [
+  { key: "Overview", label: "Overview" },
+  { key: "Transactions", label: "Transactions" },
+  { key: "Risk Intelligence", label: "Risk Intelligence" },
+  { key: "Alerts", label: "Alerts" },
+  { key: "Analytics", label: "Analytics" },
+];
+
+const PAGES = ["Accounts", "System Health"];
+
 const PAGE_SUBS = {
-  "Overview":           "Monitoring production payments · pre-settlement protection",
-  "Live Transactions":  "Real-time monitoring console",
-  "Review Queue":       "MEDIUM risk payments awaiting analyst action",
-  "Blocked":            "HIGH risk payments stopped before settlement",
-  "Analytics":          "Fraud prevention metrics and model performance",
-  "Accounts":           "Live ledger balances",
-  "System Health":      "Infrastructure and processing metrics",
+  Overview:              "Real-time transaction risk monitoring",
+  Transactions:          "Payment operations console",
+  "Risk Intelligence":   "MEDIUM risk payments awaiting analyst action",
+  Alerts:                "HIGH risk payments stopped before settlement",
+  Analytics:             "Fraud prevention reporting",
+  Accounts:              "Live ledger balances",
+  "System Health":       "Infrastructure and processing metrics",
 };
 
-// ─── Currency formatting (INR) ─────────────────────────────────────────────────
 function formatINR(n) {
   const v = Number(n);
-  if (!Number.isFinite(v)) return "—";
+  if (!Number.isFinite(v)) return "\u2014";
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
@@ -36,14 +43,14 @@ function formatINR(n) {
 
 function formatPct(n) {
   const v = Number(n);
-  if (!Number.isFinite(v)) return "—";
+  if (!Number.isFinite(v)) return "\u2014";
   return `${(v * 100).toFixed(2)}%`;
 }
 
 function timeAgo(iso) {
-  if (!iso) return "—";
+  if (!iso) return "\u2014";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
+  if (Number.isNaN(d.getTime())) return "\u2014";
   const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
   if (s < 5) return "just now";
   if (s < 60) return `${s}s ago`;
@@ -52,12 +59,19 @@ function timeAgo(iso) {
   return d.toLocaleTimeString();
 }
 
+function clockTime(iso) {
+  if (!iso) return "\u2014";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "\u2014";
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+}
+
 function levelBadge(level) {
   switch (level) {
     case "HIGH":   return <span className="badge badge-red">HIGH</span>;
     case "MEDIUM": return <span className="badge badge-amber">MEDIUM</span>;
     case "LOW":    return <span className="badge badge-green">LOW</span>;
-    default:       return <span className="badge badge-dim">{level || "—"}</span>;
+    default:       return <span className="badge badge-dim">{level || "\u2014"}</span>;
   }
 }
 
@@ -67,16 +81,16 @@ function statusBadge(status) {
     case "held":     return <span className="badge badge-amber">HELD</span>;
     case "blocked":  return <span className="badge badge-red">BLOCKED</span>;
     case "declined": return <span className="badge badge-dim">DECLINED</span>;
-    default:         return <span className="badge badge-dim">{status || "—"}</span>;
+    default:         return <span className="badge badge-dim">{status || "\u2014"}</span>;
   }
 }
 
 function amountBandBadge(band) {
   switch (band) {
     case "HIGH":     return <span className="badge badge-red">HIGH</span>;
-    case "ELEVATED": return <span className="badge badge-purple">ELEVATED</span>;
-    case "NORMAL":   return <span className="badge badge-blue">NORMAL</span>;
-    case "VERY LOW": return <span className="badge badge-dim">VERY LOW</span>;
+    case "ELEVATED": return <span className="badge badge-amber">ELEVATED</span>;
+    case "NORMAL":   return <span className="badge badge-dim">NORMAL</span>;
+    case "VERY LOW": return <span className="badge badge-green">VERY LOW</span>;
     default:         return <span className="badge badge-dim">{band || "NORMAL"}</span>;
   }
 }
@@ -87,8 +101,6 @@ function riskFillClass(level) {
   return "low";
 }
 
-// Derive an amount band from backend-provided breakpoints (data-driven).
-// Falls back gracefully if config hasn't loaded yet.
 function amountBandFor(amount, config) {
   const n = Number(amount);
   const bands = config?.amountBands || [
@@ -103,339 +115,324 @@ function amountBandFor(amount, config) {
   return "HIGH";
 }
 
-// ─── Toast system ──────────────────────────────────────────────────────────────
+const TIME_RANGES = {
+  "1H":  { ms: 60 * 60 * 1000 },
+  "6H":  { ms: 6 * 60 * 60 * 1000 },
+  "24H": { ms: 24 * 60 * 60 * 1000 },
+  "7D":  { ms: 7 * 24 * 60 * 60 * 1000 },
+  "30D": { ms: 30 * 24 * 60 * 60 * 1000 },
+};
+
+function inRange(createdAt, range) {
+  const t = new Date(createdAt).getTime();
+  if (Number.isNaN(t)) return true;
+  const cfg = TIME_RANGES[range];
+  if (!cfg) return true;
+  return Date.now() - t <= cfg.ms;
+}
+
 function ToastContainer({ toasts, onDismiss }) {
   return (
     <div className="toast-container">
       {toasts.map((t) => (
         <div key={t.id} className={`toast toast-${t.type}`}>
-          <span className="toast-icon">{t.type === "success" ? "✓" : "⚠"}</span>
+          <span className="toast-icon">{t.type === "success" ? "\u2713" : "\u26A0"}</span>
           <span>{t.msg}</span>
-          <button className="toast-close" onClick={() => onDismiss(t.id)}>✕</button>
+          <button className="toast-close" onClick={() => onDismiss(t.id)}>{"\u2715"}</button>
         </div>
       ))}
     </div>
   );
 }
 
-// ─── Transaction Detail Drawer ────────────────────────────────────────────────
-function TransactionDrawer({ txn, alerts, txns, onAction, actionPending, onClose, config }) {
-  if (!txn) return null;
+function TopNav({ page, onNav, heldCount, blockedCount, connected }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const allLinks = [...NAV.map((n) => ({ key: n.key, label: n.label })), ...PAGES.map((p) => ({ key: p, label: p }))];
 
-  const alert = alerts.find((a) => a.event_id === txn.event_id);
-  const txnState = txns.find((t) => t.event_id === txn.event_id);
-  const status = txnState ? txnState.status : txn.status;
-  const score = (txnState?.risk_score !== undefined && txnState?.risk_score !== null) ? Number(txnState.risk_score) : (alert ? alert.risk_score : null);
-  const level = txnState?.risk_level || (alert ? alert.risk_level : "LOW");
-  const reasons = txnState?.reasons ? txnState.reasons.split(" · ") : (alert ? alert.reasons : []);
-
-  const moneyMoved = status === "applied";
+  function navBtn(n) {
+    return (
+      <button
+        key={n.key}
+        className={`topnav-link ${page === n.key ? "active" : ""}`}
+        onClick={() => { onNav(n.key); setMenuOpen(false); }}
+      >
+        {n.label}
+        {n.key === "Risk Intelligence" && heldCount > 0 && <span className="nav-badge amber">{heldCount}</span>}
+        {n.key === "Alerts" && blockedCount > 0 && <span className="nav-badge">{blockedCount}</span>}
+      </button>
+    );
+  }
 
   return (
-    <div className="drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="drawer">
-        <div className="drawer-header">
-          <span className="drawer-title">Transaction Detail</span>
-          <button className="drawer-close" onClick={onClose}>✕ Close</button>
-        </div>
-
-        <div className="drawer-body">
-          {/* Core info */}
-          <div className="detail-section">
-            <div className="detail-section-title">Transaction</div>
-            <div className="detail-row">
-              <span className="detail-key">Event ID</span>
-              <span className="detail-val mono" style={{ fontSize: "11px", color: "var(--dim)" }}>{txn.event_id}</span>
-            </div>
-            <div className="detail-row">
-              <span className="detail-key">Amount</span>
-              <span className="detail-val mono" style={{ fontSize: "20px", color: "var(--text)" }}>{formatINR(txn.amount)}</span>
-            </div>
-            <div className="detail-row">
-              <span className="detail-key">Amount Band</span>
-              <span className="detail-val">{amountBandBadge(txn.amount_band || amountBandFor(txn.amount, config))}</span>
-            </div>
-            <div className="detail-row">
-              <span className="detail-key">Transfer</span>
-              <span className="detail-val mono">{txn.from_account} → {txn.to_account}</span>
-            </div>
-            <div className="detail-row">
-              <span className="detail-key">Timestamp</span>
-              <span className="detail-val">{timeAgo(txn.created_at)}</span>
-            </div>
+    <>
+      <div className="topnav-wrap">
+        <nav className="topnav">
+          <div className="brand">
+            <div className="brand-mark">LS</div>
+            Ledger<em>Stream</em> RM
           </div>
-
-          {/* Risk assessment */}
-          {score !== null && (
-            <div className="detail-section">
-              <div className="detail-section-title">AI Risk Assessment</div>
-              <div className="detail-row">
-                <span className="detail-key">Risk Score</span>
-                <span className="detail-val mono" style={{ fontSize: "20px" }}>{formatPct(score)}</span>
-              </div>
-              <div style={{ fontSize: "11px", color: "var(--dim)", marginTop: "-6px", marginBottom: "8px" }}>
-                * Estimated fraud probability
-              </div>
-              <div style={{ margin: "4px 0 8px" }}>
-                <div className="risk-score-bar">
-                  <div
-                    className={`risk-score-fill ${riskFillClass(level)}`}
-                    style={{ width: `${Math.min(score * 100, 100)}%` }}
-                  />
-                </div>
-              </div>
-              <div className="detail-row">
-                <span className="detail-key">Risk Level</span>
-                <span className="detail-val">{levelBadge(level)}</span>
-              </div>
-              <div className="detail-row">
-                <span className="detail-key">Decision</span>
-                <span className="detail-val" style={{ fontWeight: 600 }}>{alert?.action || (level === "LOW" ? "APPROVE" : (level === "MEDIUM" ? "VERIFY" : "HOLD"))}</span>
-              </div>
-            </div>
-          )}
-
-          {/* Status */}
-          <div className="detail-section">
-            <div className="detail-section-title">Settlement</div>
-            <div className="detail-row">
-              <span className="detail-key">Status</span>
-              <span className="detail-val">{statusBadge(status)}</span>
-            </div>
-            <div
-              className={`money-moved-box ${moneyMoved ? "yes" : "no"}`}
-              style={{ marginTop: "4px" }}
-            >
-              {moneyMoved ? "✓" : "✗"}
-              {" "}MONEY MOVED: {moneyMoved ? "YES — Settlement complete" : "NO — Money protected"}
-            </div>
+          <div className="topnav-center">
+            {NAV.map((n) => navBtn(n))}
           </div>
-
-          {/* AI signals */}
-          {reasons && reasons.length > 0 && (
-            <div className="detail-section">
-              <div className="detail-section-title">AI Signals <span className="dim" style={{ fontSize: "9px", marginLeft: 6 }}>(heuristic, not SHAP)</span></div>
-              {reasons.map((r, i) => (
-                <div key={i} className="review-signals" style={{ marginBottom: "4px" }}>{r}</div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Actions */}
-        {status === "held" && (
-          <div className="drawer-actions">
-            <button
-              className="btn btn-approve"
-              style={{ flex: 1 }}
-              disabled={actionPending}
-              onClick={() => onAction(txn.event_id, "approve")}
-            >
-              {actionPending ? "Processing…" : "✓ Approve & Settle"}
-            </button>
-            <button
-              className="btn btn-decline"
-              style={{ flex: 1 }}
-              disabled={actionPending}
-              onClick={() => onAction(txn.event_id, "decline")}
-            >
-              ✕ Decline
-            </button>
+          <div className="topnav-right">
+            <span className={`nav-status ${connected ? "live" : "offline"}`}>
+              <span className="nav-status-dot" />
+              {connected ? "System Healthy" : "Offline"}
+            </span>
+            <button className="nav-burger" onClick={() => setMenuOpen((v) => !v)}>{"\u2630"}</button>
           </div>
-        )}
-        {status === "blocked" && (
-          <div className="drawer-blocked-notice">
-            <div className="blocked-notice-box">⊗ Blocked — No analyst action available</div>
-          </div>
-        )}
-        {status === "applied" && (
-          <div className="drawer-blocked-notice">
-            <div className="blocked-notice-box" style={{ background: "var(--green-bg)", border: "1px solid var(--green-bd)", color: "var(--green)" }}>
-              ✓ Approved & Settled
-            </div>
-          </div>
-        )}
-        {status === "declined" && (
-          <div className="drawer-blocked-notice">
-            <div className="blocked-notice-box" style={{ background: "rgba(100,116,139,.1)", border: "1px solid rgba(100,116,139,.2)", color: "var(--dim)" }}>
-              ✕ Declined by Analyst
-            </div>
-          </div>
-        )}
+        </nav>
       </div>
-    </div>
+      <div className={`mobile-menu ${menuOpen ? "open" : ""}`}>
+        {allLinks.map((n) => navBtn(n))}
+      </div>
+    </>
   );
 }
 
-// ─── Pages ────────────────────────────────────────────────────────────────────
-
-function OverviewPage({ stats, alerts, txns, balances, connected, onSelectTxn, config }) {
-  const totalBalance = balances.reduce((s, a) => s + Number(a.balance), 0);
-  const blockedAmount = txns.filter((t) => t.status === "blocked" || t.status === "declined")
-                           .reduce((s, t) => s + Number(t.amount), 0);
-
-  const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
-  const highT = config?.riskPolicy?.highThreshold ?? 0.05;
-  const lowPct = formatPct(lowT);
-  const highPct = formatPct(highT);
-
-  return (
-    <div>
-      {/* Hero flow */}
-      <div className="overview-flow mb-20" style={{ flexDirection: "column", padding: "14px 18px", gap: "10px" }}>
-        <div style={{ display: "flex", width: "100%", alignItems: "center", gap: "6px" }}>
-          <div className="flow-node entry" style={{ borderRight: "1px solid var(--border)", flex: 1 }}>
-            <div className="flow-node-icon">💳</div>
-            <div className="flow-node-label">Transaction</div>
-            <div className="flow-node-sub">Amount + features</div>
-          </div>
-          <div style={{ padding: "0 8px", color: "var(--dim)", fontSize: "16px", fontWeight: "bold" }}>→</div>
-          <div className="flow-node ai" style={{ flex: 1.1, borderRight: "1px solid var(--border)", borderLeft: "1px solid var(--border)" }}>
-            <div className="flow-node-icon">🤖</div>
-            <div className="flow-node-label">AI Fraud Probability</div>
-            <div className="flow-node-sub">XGBoost ML · BEFORE settlement</div>
-          </div>
-          <div className="flow-outcomes" style={{ flex: 2 }}>
-            <div className="flow-outcome settle">
-              <div className="flow-outcome-score">score &lt; {lowPct}</div>
-              <div className="flow-outcome-label" style={{ color: "var(--green)" }}>LOW RISK</div>
-              <div className="flow-outcome-action">↓ APPROVE &amp; SETTLE</div>
-            </div>
-            <div className="flow-outcome hold" style={{ borderLeft: "1px solid var(--border)", borderRight: "1px solid var(--border)" }}>
-              <div className="flow-outcome-score">{lowPct} – {highPct}</div>
-              <div className="flow-outcome-label" style={{ color: "var(--amber)" }}>MEDIUM RISK</div>
-              <div className="flow-outcome-action">↓ HOLD for REVIEW</div>
-            </div>
-            <div className="flow-outcome block">
-              <div className="flow-outcome-score">score &gt; {highPct}</div>
-              <div className="flow-outcome-label" style={{ color: "var(--red)" }}>HIGH RISK</div>
-              <div className="flow-outcome-action">↓ BLOCK before settlement</div>
-            </div>
-          </div>
-        </div>
-        <div style={{ fontSize: "11px", color: "var(--dim)", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: "6px" }}>
-          * Risk Score = estimated fraud probability from the ML model. The amount is a model feature; the risk classification is driven by the model's fraud probability.
-        </div>
-      </div>
-
-      {/* KPI Grid */}
-      <div className="kpi-grid mb-20">
-        <div className="kpi-card red">
-          <div className="kpi-label">Blocked (HIGH)</div>
-          <div className="kpi-value">{Number(stats?.blockedCount ?? 0).toLocaleString()}</div>
-          <div className="kpi-sub">fraud prevented · 0 settled</div>
-        </div>
-        <div className="kpi-card amber">
-          <div className="kpi-label">Awaiting Review</div>
-          <div className="kpi-value">{Number(stats?.heldCount ?? 0).toLocaleString()}</div>
-          <div className="kpi-sub">MEDIUM risk · held</div>
-        </div>
-        <div className="kpi-card green">
-          <div className="kpi-label">Approved</div>
-          <div className="kpi-value">{Number(stats?.appliedCount ?? 0).toLocaleString()}</div>
-          <div className="kpi-sub">LOW risk · settled</div>
-        </div>
-        <div className="kpi-card dim">
-          <div className="kpi-label">Declined</div>
-          <div className="kpi-value">{Number(stats?.declinedCount ?? 0).toLocaleString()}</div>
-          <div className="kpi-sub">analyst rejected</div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-label">Transactions Analyzed</div>
-          <div className="kpi-value">{Number(stats?.analyzed ?? 0).toLocaleString()}</div>
-          <div className="kpi-sub">AI-scored total</div>
-        </div>
-        <div className="kpi-card green">
-          <div className="kpi-label">Funds Protected</div>
-          <div className="kpi-value sm">{formatINR(blockedAmount)}</div>
-          <div className="kpi-sub">blocked + declined</div>
-        </div>
-      </div>
-
-      {/* Two columns: recent decisions + risk distribution */}
-      <div className="page-row col-2" style={{ gap: 16 }}>
-        {/* Recent risk decisions */}
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title"><span className="dot-indicator dot-purple" />Recent Risk Decisions</span>
-            <span className="card-meta">latest 8 · click to view</span>
-          </div>
-          <div>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Event</th>
-                  <th>Amount</th>
-                  <th>Level</th>
-                  <th>Status</th>
-                  <th>When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {txns.slice(0, 8).map((t) => {
-                  const level = t.risk_level || "LOW";
-                  return (
-                    <tr key={t.event_id} className="clickable" onClick={() => onSelectTxn(t.event_id)}>
-                      <td className="mono dim" style={{ fontSize: "11px" }}>{t.event_id.slice(0, 10)}</td>
-                      <td className="mono" style={{ fontWeight: 600 }}>{formatINR(t.amount)}</td>
-                      <td>{levelBadge(level)}</td>
-                      <td>{statusBadge(t.status)}</td>
-                      <td className="dim" style={{ fontSize: "11px" }}>{timeAgo(t.created_at)}</td>
-                    </tr>
-                  );
-                })}
-                {txns.length === 0 && (
-                  <tr><td colSpan={5} className="empty-state">No decisions yet</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Risk distribution */}
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title"><span className="dot-indicator dot-blue" />Risk Distribution</span>
-            <span className="card-meta">by transaction count</span>
-          </div>
-          <div className="card-body">
-            <RiskDistribution stats={stats} />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function RiskDistribution({ stats }) {
+function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn, onRefresh, timeRange, onTimeRange, connected }) {
+  const rangeTxns = txns.filter((t) => inRange(t.created_at, timeRange));
   const applied  = Number(stats?.appliedCount  ?? 0);
   const held     = Number(stats?.heldCount     ?? 0);
   const blocked  = Number(stats?.blockedCount  ?? 0);
   const declined = Number(stats?.declinedCount ?? 0);
-  const total = applied + held + blocked + declined || 1;
+  const analyzed = Number(stats?.analyzed ?? 0);
 
-  const bars = [
-    { label: "Approved",  value: applied,  color: "var(--green)", bg: "var(--green-bg)" },
-    { label: "Held",      value: held,     color: "var(--amber)", bg: "var(--amber-bg)" },
-    { label: "Blocked",   value: blocked,  color: "var(--red)",   bg: "var(--red-bg)" },
-    { label: "Declined",  value: declined, color: "var(--dim)",   bg: "rgba(100,116,139,.1)" },
-  ];
+  const blockedValue = Number(stats?.blockedValue ?? 0);
+  const totalBalance = balances.reduce((s, a) => s + Number(a.balance), 0);
+
+  let liveScore = null;
+  let liveLevel = "LOW";
+  if (alerts.length > 0) {
+    const recent = alerts[0];
+    if (recent?.risk_score != null) {
+      liveScore = Number(recent.risk_score);
+      const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
+      const highT = config?.riskPolicy?.highThreshold ?? 0.10;
+      if (liveScore >= highT) liveLevel = "HIGH";
+      else if (liveScore >= lowT) liveLevel = "MEDIUM";
+    }
+  }
+
+  const lowCount = applied;
+  const medCount = held;
+  const highCount = blocked + declined;
+  const donutTotal = lowCount + medCount + highCount || 1;
+  const lowPct = lowCount / donutTotal;
+  const medPct = medCount / donutTotal;
+
+  const donutStops = [
+    { color: "#10B981", from: 0, to: lowPct * 100 },
+    { color: "#D97706", from: lowPct * 100, to: (lowPct + medPct) * 100 },
+    { color: "#EF4444", from: (lowPct + medPct) * 100, to: 100 },
+  ].filter((s) => s.to - s.from > 0.01);
+  const gradStr = donutStops
+    .map((s, i) => `${s.color} ${i === 0 ? 0 : s.from}% ${i === donutStops.length - 1 ? 100 : s.to}%`)
+    .join(", ");
+
+  const stream = rangeTxns.slice(0, 8);
+  const ledgerLag = Number(lag?.ledger?.lag ?? 0);
+  const fraudLag  = Number(lag?.fraud?.lag  ?? 0);
+  const maxLag = Math.max(ledgerLag, fraudLag);
+
+  const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
+  const highT = config?.riskPolicy?.highThreshold ?? 0.10;
+
+  const pipelineScore = liveScore !== null ? formatPct(liveScore) : "\u2014";
+  const pipelineDecision = liveLevel === "HIGH" ? "BLOCK" : liveLevel === "MEDIUM" ? "VERIFY" : "APPROVE";
+  const pipelineEnforce = liveLevel === "HIGH" ? "BLOCKED" : liveLevel === "MEDIUM" ? "HELD" : "SETTLED";
 
   return (
-    <div className="bar-chart">
-      {bars.map(({ label, value, color }) => (
-        <div key={label} className="bar-row">
-          <div className="bar-label">{label}</div>
-          <div className="bar-track">
-            <div className="bar-fill" style={{ width: `${(value / total) * 100}%`, background: color }} />
+    <>
+      <section className="header-section">
+        <div className="header-inner">
+          <div className="header-eyebrow">
+            <span className="nav-status-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--emerald)", boxShadow: "0 0 6px rgba(16,185,129,.8)" }} />
+            AI Risk Manager
           </div>
-          <div className="bar-value">{value.toLocaleString()}</div>
+          <h1 className="header-title">Real-time transaction risk detection and automated enforcement.</h1>
+          <p className="header-sub">
+            Every transaction is scored by the ML risk engine before settlement. High-risk payments are blocked automatically.
+          </p>
         </div>
-      ))}
-      <div style={{ marginTop: 16, fontSize: 11, color: "var(--dim)", fontFamily: "var(--mono)" }}>
-        Total transactions in log: {(applied + held + blocked + declined).toLocaleString()}
+      </section>
+
+      <section className="pipeline">
+        <div className="pipeline-flow">
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">01</div>
+            <div className="pipeline-stage-title">Transaction</div>
+            <div className="pipeline-stage-desc">Payment event received via Kafka</div>
+          </div>
+          <div className="pipeline-arrow">{"\u2192"}</div>
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">02</div>
+            <div className="pipeline-stage-title">Risk Engine</div>
+            <div className="pipeline-stage-desc">ML model computes fraud probability</div>
+          </div>
+          <div className="pipeline-arrow">{"\u2192"}</div>
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">03</div>
+            <div className="pipeline-stage-title">Risk Score</div>
+            <div className="pipeline-stage-value">{pipelineScore}</div>
+            <div className="pipeline-stage-desc">Latest: {liveLevel} risk</div>
+          </div>
+          <div className="pipeline-arrow">{"\u2192"}</div>
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">04</div>
+            <div className="pipeline-stage-title">Decision</div>
+            <div className="pipeline-stage-value">{pipelineDecision}</div>
+            <div className="pipeline-stage-desc">Thresholds: {formatPct(lowT)} / {formatPct(highT)}</div>
+          </div>
+          <div className="pipeline-arrow">{"\u2192"}</div>
+          <div className="pipeline-stage">
+            <div className="pipeline-stage-num">05</div>
+            <div className="pipeline-stage-title">Enforcement</div>
+            <div className="pipeline-stage-value">{pipelineEnforce}</div>
+            <div className="pipeline-stage-desc">Automated ledger action</div>
+          </div>
+        </div>
+      </section>
+
+      <div className="content">
+        <div className="content-head">
+          <div>
+            <div className="content-head-title">Live Risk Overview</div>
+            <div className="content-head-sub">Real-time system health and risk metrics</div>
+          </div>
+          <div className="content-head-right">
+            {["1H", "6H", "24H", "7D", "30D"].map((r) => (
+              <button key={r} className={`time-chip${timeRange === r ? " active" : ""}`} onClick={() => onTimeRange(r)}>{r}</button>
+            ))}
+            <button className="refresh-btn" onClick={onRefresh} title="Refresh">{"\u27F3"} Refresh</button>
+          </div>
+        </div>
+
+        <div className="kpi-row">
+          <div className="kpi-card">
+            <div className="kpi-accent green" />
+            <div className="kpi-label">Current Ledger Balance</div>
+            <div className="kpi-value sm emerald">{formatINR(totalBalance)}</div>
+            <div className="kpi-sub">{balances.length} accounts {"\u00B7"} conserved</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-accent green" />
+            <div className="kpi-label">Transactions Processed</div>
+            <div className="kpi-value">{analyzed.toLocaleString()}</div>
+            <div className="kpi-sub">AI-scored via risk engine</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-accent red" />
+            <div className="kpi-label">Blocked Transactions</div>
+            <div className="kpi-value red">{blocked.toLocaleString()}</div>
+            <div className="kpi-sub">stopped before settlement</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-accent red" />
+            <div className="kpi-label">Blocked Transaction Value</div>
+            <div className="kpi-value sm red">{formatINR(blockedValue)}</div>
+            <div className="kpi-sub">cumulative value blocked</div>
+          </div>
+        </div>
+
+        <div className="grid-2">
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title"><span className="dot-indicator dot-green" /> Risk Distribution</span>
+              <span className="card-meta">by transaction count</span>
+            </div>
+            <div className="card-body">
+              <div className="donut-wrap">
+                <div className="donut">
+                  <svg viewBox="0 0 160 160" width="140" height="140">
+                    <circle cx="80" cy="80" r="60" fill="none" stroke="var(--cream-2)" strokeWidth="12" />
+                    <circle
+                      cx="80" cy="80" r="60"
+                      fill="none" stroke={gradStr}
+                      strokeWidth="12"
+                      strokeLinecap="round"
+                      transform="rotate(-90 80 80)"
+                      style={{ transition: "stroke .5s ease" }}
+                    />
+                  </svg>
+                  <div className="donut-center">
+                    <strong>{donutTotal.toLocaleString()}</strong>
+                    <span>total</span>
+                  </div>
+                </div>
+                <div className="donut-legend">
+                  {[
+                    { label: "Low Risk", value: lowCount, color: "#10B981" },
+                    { label: "Medium Risk", value: medCount, color: "#D97706" },
+                    { label: "High Risk", value: highCount, color: "#EF4444" },
+                  ].filter((i) => i.value > 0).map((i) => (
+                    <div key={i.label} className="legend-row">
+                      <span className="legend-dot" style={{ background: i.color }} />
+                      {i.label}
+                      <span className="legend-count">{i.value.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title"><span className="dot-indicator dot-green" /> Recent Transactions</span>
+              <span className="card-meta">live stream {"\u00B7"} click to inspect</span>
+            </div>
+            <div className="card-body" style={{ padding: "8px 12px" }}>
+              <div className="txn-stream">
+                {stream.length === 0 && <div className="empty-state">No transactions yet</div>}
+                {stream.map((t) => {
+                  const level = t.risk_level || "LOW";
+                  const score = t.risk_score != null ? Number(t.risk_score) : null;
+                  const icon = level === "HIGH" ? "\u2297" : level === "MEDIUM" ? "\u23F8" : "\u2713";
+                  return (
+                    <div key={t.event_id} className="txn-item" onClick={() => onSelectTxn(t.event_id)}>
+                      <div className={`txn-icon ${level.toLowerCase()}`}>{icon}</div>
+                      <div className="txn-main">
+                        <div className="txn-id">{t.event_id.length > 16 ? t.event_id.slice(0, 16) + "\u2026" : t.event_id}</div>
+                        <div className="txn-meta">{timeAgo(t.created_at)} {"\u00B7"} {t.from_account} {"\u2192"} {t.to_account}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div className="txn-amount">{formatINR(t.amount)}</div>
+                        <div className="txn-score">{score !== null ? `risk ${formatPct(score)}` : level}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="health-bar">
+          <span className="health-bar-label">System Health</span>
+          <div className="health-sep" />
+          <div className="health-item">
+            <span className={`health-dot ${connected ? "ok" : "err"}`} />
+            API
+          </div>
+          <div className="health-sep" />
+          <div className="health-item">
+            <span className={`health-dot ${maxLag === 0 ? "ok" : maxLag < 100 ? "warn" : "err"}`} />
+            Kafka Lag: {maxLag}
+          </div>
+          <div className="health-sep" />
+          <div className="health-item">
+            <span className="health-dot ok" />
+            PostgreSQL
+          </div>
+          <div className="health-sep" />
+          <div className="health-item">
+            <span className="health-dot ok" />
+            ML Engine
+          </div>
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -443,15 +440,11 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [levelFilter, setLevelFilter] = useState("all");
-  const [bandFilter, setBandFilter] = useState("all");
 
   const filtered = txns.filter((t) => {
-    const a = alerts.find((x) => x.event_id === t.event_id);
-    const level = t.risk_level || a?.risk_level || "LOW";
-    const band = t.amount_band || amountBandFor(t.amount, config);
+    const level = t.risk_level || "LOW";
     if (statusFilter !== "all" && t.status !== statusFilter) return false;
     if (levelFilter !== "all" && level !== levelFilter) return false;
-    if (bandFilter !== "all" && band !== bandFilter) return false;
     if (search) {
       const q = search.toLowerCase();
       if (!t.event_id.toLowerCase().includes(q) &&
@@ -464,13 +457,7 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
   return (
     <div>
       <div className="filters">
-        <input
-          className="filter-input"
-          placeholder="Search by ID, account…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{ minWidth: 180 }}
-        />
+        <input className="filter-input" placeholder="Search by ID, account…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ minWidth: 180 }} />
         <select className="filter-input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="all">All Decisions</option>
           <option value="applied">Approved</option>
@@ -484,13 +471,7 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
           <option value="MEDIUM">MEDIUM</option>
           <option value="HIGH">HIGH</option>
         </select>
-        <select className="filter-input" value={bandFilter} onChange={(e) => setBandFilter(e.target.value)}>
-          <option value="all">All Amount Bands</option>
-          {(config?.amountBands || []).map((b) => (
-            <option key={b.label} value={b.label}>{b.label}</option>
-          ))}
-        </select>
-        <span className="dim" style={{ fontSize: 12, marginLeft: 4, alignSelf: "center" }}>
+        <span className="dim" style={{ fontSize: 11, marginLeft: 4, alignSelf: "center" }}>
           {filtered.length} / {txns.length} transactions
         </span>
       </div>
@@ -504,7 +485,6 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
                 <th>Amount</th>
                 <th>Transfer</th>
                 <th>AI Risk</th>
-                <th>Amount Band</th>
                 <th>Decision</th>
                 <th>Settlement</th>
                 <th>When</th>
@@ -512,37 +492,23 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
             </thead>
             <tbody>
               {filtered.slice(0, 100).map((t) => {
-                const a = alerts.find((x) => x.event_id === t.event_id);
-                const score = (t.risk_score !== undefined && t.risk_score !== null) ? Number(t.risk_score) : (a ? a.risk_score : null);
-                const band = t.amount_band || amountBandFor(t.amount, config);
+                const score = t.risk_score != null ? Number(t.risk_score) : null;
                 return (
-                  <tr
-                    key={t.event_id}
-                    className={`clickable ${t.event_id === selectedTxnId ? "selected" : ""}`}
-                    onClick={() => onSelectTxn(t.event_id)}
-                  >
-                    <td className="mono dim" style={{ fontSize: "11px" }}>{t.event_id.slice(0, 12)}…</td>
-                    <td className="mono" style={{ fontWeight: 600 }}>{formatINR(t.amount)}</td>
-                    <td className="mono">{t.from_account} → {t.to_account}</td>
-                    <td className="mono" title="Estimated fraud probability">{score !== null ? formatPct(score) : "—"}</td>
-                    <td>{amountBandBadge(band)}</td>
+                  <tr key={t.event_id} className={`clickable ${t.event_id === selectedTxnId ? "selected" : ""}`} onClick={() => onSelectTxn(t.event_id)}>
+                    <td className="mono dim" style={{ fontSize: 10.5 }}>{t.event_id.length > 14 ? t.event_id.slice(0, 14) + "\u2026" : t.event_id}</td>
+                    <td style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatINR(t.amount)}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{t.from_account} {"\u2192"} {t.to_account}</td>
+                    <td style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{score !== null ? formatPct(score) : "\u2014"}</td>
                     <td>{statusBadge(t.status)}</td>
-                    <td className="mono" style={{ fontWeight: 600, color: t.status === "applied" ? "var(--green)" : "var(--dim)" }}>
+                    <td style={{ fontWeight: 600, color: t.status === "applied" ? "var(--green-text)" : "var(--slate)", fontVariantNumeric: "tabular-nums" }}>
                       {t.status === "applied" ? `${formatINR(t.amount)} MOVED` : "₹0.00 MOVED"}
                     </td>
-                    <td className="dim" style={{ fontSize: "11px" }}>{timeAgo(t.created_at)}</td>
+                    <td className="dim" style={{ fontSize: 10.5 }}>{timeAgo(t.created_at)}</td>
                   </tr>
                 );
               })}
               {filtered.length === 0 && (
-                <tr>
-                  <td colSpan={8}>
-                    <div className="empty-state">
-                      <div className="empty-state-icon">↯</div>
-                      No transactions match your filters
-                    </div>
-                  </td>
-                </tr>
+                <tr><td colSpan={7}><div className="empty-state">No transactions match your filters</div></td></tr>
               )}
             </tbody>
           </table>
@@ -558,8 +524,8 @@ function ReviewQueuePage({ txns, alerts, onAction, actionPending, onSelectTxn, c
   if (held.length === 0) {
     return (
       <div className="card">
-        <div className="empty-state" style={{ padding: "60px 24px" }}>
-          <div className="empty-state-icon">⏸</div>
+        <div className="empty-state" style={{ padding: "60px 20px" }}>
+          <div className="empty-state-icon">{"\u23F8"}</div>
           <div style={{ fontWeight: 600, marginBottom: 4 }}>Review queue is empty</div>
           <div className="dim">No MEDIUM risk transactions awaiting review</div>
         </div>
@@ -569,93 +535,53 @@ function ReviewQueuePage({ txns, alerts, onAction, actionPending, onSelectTxn, c
 
   return (
     <div>
-      <div
-        style={{
-          background: "var(--amber-bg)",
-          border: "1px solid var(--amber-bd)",
-          borderRadius: "var(--radius)",
-          padding: "10px 16px",
-          marginBottom: 20,
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          fontSize: 12.5,
-          color: "var(--amber)",
-          fontWeight: 600,
-        }}
-      >
-        ⏸ {held.length} payment{held.length > 1 ? "s" : ""} held by AI engine — settlement frozen, awaiting analyst decision
+      <div className="info-banner">
+        <span>{"\u23F8"}</span>
+        <span>{held.length} payment{held.length > 1 ? "s" : ""} are held {"\u2014"} the risk engine flagged them as MEDIUM risk. Review and settle, or decline.</span>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 14 }}>
+      <div className="page-grid">
         {held.map((tx) => {
           const a = alerts.find((x) => x.event_id === tx.event_id);
-          const score = (tx.risk_score !== undefined && tx.risk_score !== null) ? Number(tx.risk_score) : (a ? a.risk_score : null);
-          const reasons = tx.reasons ? tx.reasons.split(" · ") : (a ? a.reasons : ["MEDIUM risk transaction flagged by AI"]);
+          const score = tx.risk_score != null ? Number(tx.risk_score) : (a ? a.risk_score : null);
+          const reasons = tx.reasons ? tx.reasons.split(" \u00B7 ") : (a ? a.reasons : ["MEDIUM risk transaction flagged by AI"]);
           return (
-            <div key={tx.event_id} className="review-card">
+            <div key={tx.event_id} className="review-card" onClick={() => onSelectTxn(tx.event_id)}>
               <div className="review-card-header">
                 <div>
-                  <div className="review-card-id">{tx.event_id.slice(0, 12)}…</div>
-                  <div style={{ marginTop: 2 }}>{statusBadge("held")}</div>
+                  <div className="review-card-id">{tx.event_id.length > 14 ? tx.event_id.slice(0, 14) + "\u2026" : tx.event_id}</div>
+                  <div style={{ marginTop: 4 }}>{statusBadge("held")}</div>
                 </div>
                 <div className="review-card-amount">{formatINR(tx.amount)}</div>
               </div>
-
               <div className="review-card-meta">
                 <div className="review-meta-item">
                   <div className="review-meta-label">Transfer</div>
-                  <div className="review-meta-value">{tx.from_account} → {tx.to_account}</div>
-                </div>
-                <div className="review-meta-item">
-                  <div className="review-meta-label">Amount Band</div>
-                  <div className="review-meta-value">
-                    {amountBandBadge(tx.amount_band || amountBandFor(tx.amount, config))}
-                  </div>
+                  <div className="review-meta-value">{tx.from_account} {"\u2192"} {tx.to_account}</div>
                 </div>
                 <div className="review-meta-item">
                   <div className="review-meta-label">AI Risk</div>
-                  <div className="review-meta-value" style={{ color: "var(--amber)", fontWeight: 700 }}>
-                    {score !== null ? formatPct(score) : "—"}
-                  </div>
+                  <div className="review-meta-value" style={{ color: "var(--amber)", fontWeight: 700 }}>{score != null ? formatPct(score) : "\u2014"}</div>
                 </div>
                 <div className="review-meta-item">
                   <div className="review-meta-label">Waiting</div>
                   <div className="review-meta-value">{timeAgo(tx.created_at)}</div>
                 </div>
-              </div>
-
-              <div style={{ fontSize: 10, color: "var(--dim)", marginTop: -6, marginBottom: 10 }}>
-                * Estimated fraud probability
-              </div>
-
-              {reasons.length > 0 && (
-                <div className="review-signals">
-                  <strong>Why flagged:</strong><br />
-                  {reasons.join(" · ")}
+                <div className="review-meta-item">
+                  <div className="review-meta-label">Amount Band</div>
+                  <div className="review-meta-value">{amountBandBadge(tx.amount_band || amountBandFor(tx.amount, config))}</div>
                 </div>
-              )}
-
-              <div className="review-money-frozen">
-                ✗ MONEY MOVED: NO — Settlement frozen
               </div>
-
-              <div className="review-actions">
-                <button
-                  className="btn btn-approve"
-                  style={{ flex: 1 }}
-                  disabled={actionPending}
-                  onClick={() => onAction(tx.event_id, "approve")}
-                >
-                  {actionPending ? "…" : "✓ Approve & Settle"}
+              {reasons.length > 0 && (
+                <div className="review-signals"><strong>Why flagged:</strong><br />{reasons.join(" \u00B7 ")}</div>
+              )}
+              <div className="review-money-frozen">{"\u2717"} MONEY MOVED: NO {"\u2014"} Settlement frozen</div>
+              <div className="review-actions" onClick={(e) => e.stopPropagation()}>
+                <button className="btn btn-approve" style={{ flex: 1 }} disabled={actionPending} onClick={() => onAction(tx.event_id, "approve")}>
+                  {actionPending ? "\u2026" : "\u2713 Approve & Settle"}
                 </button>
-                <button
-                  className="btn btn-decline"
-                  style={{ flex: 1 }}
-                  disabled={actionPending}
-                  onClick={() => onAction(tx.event_id, "decline")}
-                >
-                  ✕ Decline
+                <button className="btn btn-decline" style={{ flex: 1 }} disabled={actionPending} onClick={() => onAction(tx.event_id, "decline")}>
+                  {"\u2715"} Decline
                 </button>
               </div>
             </div>
@@ -666,18 +592,20 @@ function ReviewQueuePage({ txns, alerts, onAction, actionPending, onSelectTxn, c
   );
 }
 
-function BlockedPage({ txns, alerts, config }) {
+function BlockedPage({ txns, alerts, config, stats }) {
+  const [expandedId, setExpandedId] = useState(null);
   const blocked = txns.filter((t) => t.status === "blocked");
-  const totalBlocked = blocked.reduce((s, t) => s + Number(t.amount), 0);
+  const blockedCount = Number(stats?.blockedCount ?? blocked.length);
+  const totalBlocked = Number(stats?.blockedValue ?? blocked.reduce((s, t) => s + Number(t.amount), 0));
 
   if (blocked.length === 0) {
     return (
       <div className="card">
-        <div className="empty-state" style={{ padding: "80px 24px" }}>
-          <div className="empty-state-icon" style={{ fontSize: "40px", color: "var(--dim)", marginBottom: 12 }}>⊗</div>
-          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>No Blocked Transactions</div>
-          <div className="dim" style={{ fontSize: 13, maxWidth: 360, margin: "0 auto" }}>
-            HIGH risk transactions (Estimated fraud probability above the configured block threshold) are automatically blocked before settlement. No high-risk transactions have been detected in this monitoring session.
+        <div className="empty-state" style={{ padding: "60px 20px" }}>
+          <div className="empty-state-icon">{"\u2297"}</div>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>No Blocked Transactions</div>
+          <div className="dim" style={{ fontSize: 12, maxWidth: 380, margin: "0 auto" }}>
+            HIGH risk transactions (fraud probability above the block threshold) are automatically blocked before settlement. No high-risk transactions have been detected in this session.
           </div>
         </div>
       </div>
@@ -686,74 +614,124 @@ function BlockedPage({ txns, alerts, config }) {
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
-        <div className="kpi-card red" style={{ flex: 1 }}>
-          <div className="kpi-label">Total Blocked</div>
-          <div className="kpi-value">{blocked.length}</div>
-          <div className="kpi-sub">payments stopped by AI</div>
+      <div className="alerts-summary">
+        <div className="alerts-summary-card">
+          <div className="kpi-accent red" />
+          <div className="alerts-summary-top">
+            <span className="alerts-summary-label">Total Blocked</span>
+            <span className="alerts-summary-value red">{blockedCount}</span>
+          </div>
+          <div className="alerts-summary-sub">Payments stopped before settlement</div>
         </div>
-        <div className="kpi-card red" style={{ flex: 2 }}>
-          <div className="kpi-label">Total Funds Protected</div>
-          <div className="kpi-value sm">{formatINR(totalBlocked)}</div>
-          <div className="kpi-sub">money never moved</div>
+        <div className="alerts-summary-card">
+          <div className="kpi-accent red" />
+          <div className="alerts-summary-top">
+            <span className="alerts-summary-label">Total Value Blocked</span>
+            <span className="alerts-summary-value red">{formatINR(totalBlocked)}</span>
+          </div>
+          <div className="alerts-summary-sub">Cumulative value of transactions blocked by the risk engine</div>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 14 }}>
+      <div className="alerts-section-head">
+        <div>
+          <div className="alerts-section-title">High Risk Transactions</div>
+          <div className="alerts-section-sub">Transactions blocked by the risk engine before settlement.</div>
+        </div>
+        <div className="alerts-count">{blocked.length} BLOCKED</div>
+      </div>
+
+      <div className="alerts-grid">
         {blocked.map((tx) => {
           const a = alerts.find((x) => x.event_id === tx.event_id);
-          const score = (tx.risk_score !== undefined && tx.risk_score !== null) ? Number(tx.risk_score) : (a ? a.risk_score : null);
-          const reasons = tx.reasons ? tx.reasons.split(" · ") : (a ? a.reasons : ["HIGH risk transaction flagged by AI"]);
+          const score = tx.risk_score != null ? Number(tx.risk_score) : (a ? a.risk_score : null);
+          const reasons = tx.reasons ? tx.reasons.split(" \u00B7 ") : (a ? a.reasons : ["HIGH risk transaction flagged by AI"]);
+
           return (
-            <div key={tx.event_id} className="blocked-card" style={{ border: "1px solid var(--red-bd)", background: "var(--red-bg)", padding: 16, borderRadius: "var(--radius)" }}>
-              <div style={{ fontSize: 10, color: "var(--red)", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 4 }}>
-                HIGH RISK TRANSACTION
-              </div>
-              <div className="review-card-header" style={{ marginBottom: 12 }}>
-                <div>
-                  <div className="review-card-id" style={{ fontFamily: "var(--mono)", fontSize: 12.5 }}>{tx.event_id.slice(0, 12)}…</div>
-                  <div style={{ marginTop: 4 }}>{statusBadge("blocked")}</div>
+            <div key={tx.event_id} className={`alerts-card ${expandedId === tx.event_id ? "expanded" : ""}`}>
+              <div className="alerts-card-row" onClick={() => setExpandedId(expandedId === tx.event_id ? null : tx.event_id)}>
+                <div className="alerts-id-col">
+                  <div className="alerts-risk-tag">
+                    <span className="alerts-dot" /> HIGH RISK
+                  </div>
+                  <div className="alerts-id">{tx.event_id}</div>
+                  <div className="alerts-amount">{formatINR(tx.amount)}</div>
                 </div>
-                <div className="blocked-card-amount" style={{ color: "var(--red)", fontWeight: 700, fontSize: 20 }}>{formatINR(tx.amount)}</div>
-              </div>
-
-              <div className="review-card-meta" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, background: "rgba(0,0,0,0.15)", padding: 10, borderRadius: "var(--radius-sm)", marginBottom: 12 }}>
-                <div className="review-meta-item">
-                  <div className="review-meta-label" style={{ fontSize: 10, color: "var(--dim)" }}>Transfer</div>
-                  <div className="review-meta-value" style={{ fontFamily: "var(--mono)", fontSize: 12 }}>{tx.from_account} → {tx.to_account}</div>
-                </div>
-                <div className="review-meta-item">
-                  <div className="review-meta-label">Amount Band</div>
-                  <div className="review-meta-value">
-                    {amountBandBadge(tx.amount_band || amountBandFor(tx.amount, config))}
+                <div className="alerts-meta-col">
+                  <div className="alerts-meta-row">
+                    <span className="alerts-meta-label">Transfer</span>
+                    <span className="alerts-meta-value">{tx.from_account} {"\u2192"} {tx.to_account}</span>
+                  </div>
+                  <div className="alerts-meta-row">
+                    <span className="alerts-meta-label">AI Risk</span>
+                    <span className="alerts-meta-value risk-red">{score != null ? formatPct(score) : "\u2014"}</span>
+                  </div>
+                  <div className="alerts-meta-row">
+                    <span className="alerts-meta-label">Timestamp</span>
+                    <span className="alerts-meta-value">{clockTime(tx.created_at)}</span>
+                  </div>
+                  <div className="alerts-meta-row">
+                    <span className="alerts-meta-label">Amount Band</span>
+                    <span className="alerts-meta-value">{amountBandBadge(tx.amount_band || amountBandFor(tx.amount, config))}</span>
                   </div>
                 </div>
-                <div className="review-meta-item">
-                  <div className="review-meta-label" style={{ fontSize: 10, color: "var(--dim)" }}>AI Risk</div>
-                  <div className="review-meta-value" style={{ color: "var(--red)", fontWeight: 700 }}>
-                    {score !== null ? formatPct(score) : "—"}
+                <div className="alerts-status-col">
+                  {statusBadge("blocked")}
+                  <div className={`alerts-toggle ${expandedId === tx.event_id ? "open" : ""}`}>
+                    {expandedId === tx.event_id ? "Hide" : "Detail"}
                   </div>
                 </div>
-                <div className="review-meta-item">
-                  <div className="review-meta-label" style={{ fontSize: 10, color: "var(--dim)" }}>Timestamp</div>
-                  <div className="review-meta-value" style={{ fontSize: 11 }}>{timeAgo(tx.created_at)}</div>
+                <div className="alerts-evidence">
+                  <span className="alerts-evidence-label">Signal</span>
+                  <span className="alerts-evidence-text">
+                    {reasons[0] || "High risk pattern detected"}
+                    {reasons.length > 1 ? `  \u00B7  +${reasons.length - 1} more` : ""}
+                  </span>
                 </div>
               </div>
 
-              <div style={{ fontSize: 10, color: "var(--dim)", marginBottom: 10 }}>
-                * Estimated fraud probability
-              </div>
+              {expandedId === tx.event_id && (
+                <div className="alerts-detail">
+                  <div className="alerts-detail-grid">
+                    <div className="alerts-detail-item">
+                      <div className="alerts-detail-label">Transfer</div>
+                      <div className="alerts-detail-value">{tx.from_account} {"\u2192"} {tx.to_account}</div>
+                    </div>
+                    <div className="alerts-detail-item">
+                      <div className="alerts-detail-label">AI Risk</div>
+                      <div className="alerts-detail-value risk-red">{score != null ? formatPct(score) : "\u2014"}</div>
+                    </div>
+                    <div className="alerts-detail-item">
+                      <div className="alerts-detail-label">Timestamp</div>
+                      <div className="alerts-detail-value">{clockTime(tx.created_at)}</div>
+                    </div>
+                    <div className="alerts-detail-item">
+                      <div className="alerts-detail-label">Amount Band</div>
+                      <div className="alerts-detail-value">{amountBandBadge(tx.amount_band || amountBandFor(tx.amount, config))}</div>
+                    </div>
+                  </div>
 
-              {reasons.length > 0 && (
-                <div className="review-signals" style={{ marginBottom: 12, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "var(--radius-sm)", padding: 8, fontSize: 11.5 }}>
-                  <strong>Behavioral Signals:</strong><br />
-                  {reasons.join(" · ")}
+                  {reasons.length > 0 && (
+                    <div className="alerts-signals">
+                      <div className="alerts-signals-label">Risk Signals</div>
+                      <div className="alerts-signal-chips">
+                        {reasons.map((r, i) => (
+                          <span key={i} className="alerts-signal-chip">{r}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="alerts-block-decide">
+                    <div className="alerts-block-decide-title">BLOCKED BEFORE SETTLEMENT</div>
+                    <div className="alerts-block-decide-sub">AI detected risk {"\u2192"} transaction blocked {"\u2192"} money never moved</div>
+                    <div className="alerts-money">
+                      <span className="alerts-money-item">MONEY MOVED: NO</span>
+                      <span className="alerts-money-item-highlight">FRAUD PREVENTED</span>
+                    </div>
+                  </div>
                 </div>
               )}
-
-              <div className="blocked-prevented-box" style={{ background: "var(--red)", color: "white", padding: 10, borderRadius: "var(--radius-sm)", textAlign: "center", fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                ⊗ BLOCKED BEFORE SETTLEMENT · MONEY MOVED: NO · FRAUD PREVENTED
-              </div>
             </div>
           );
         })}
@@ -776,28 +754,28 @@ function AnalyticsPage({ stats, txns, alerts, config }) {
   const totalAmount    = appliedAmount + blockedAmount + heldAmount + declinedAmount || 1;
 
   const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
-  const highT = config?.riskPolicy?.highThreshold ?? 0.05;
+  const highT = config?.riskPolicy?.highThreshold ?? 0.10;
 
   const statusBars = [
     { label: "Approved", value: applied,  pct: applied/total,  color: "var(--green)" },
     { label: "Held",     value: held,     pct: held/total,     color: "var(--amber)" },
     { label: "Blocked",  value: blocked,  pct: blocked/total,  color: "var(--red)" },
-    { label: "Declined", value: declined, pct: declined/total, color: "var(--dim)" },
+    { label: "Declined", value: declined, pct: declined/total, color: "var(--slate)" },
   ];
 
   const amountBars = [
     { label: "Approved",  value: appliedAmount,  pct: appliedAmount/totalAmount,  color: "var(--green)" },
     { label: "Held",      value: heldAmount,     pct: heldAmount/totalAmount,     color: "var(--amber)" },
     { label: "Blocked",   value: blockedAmount,  pct: blockedAmount/totalAmount,  color: "var(--red)" },
-    { label: "Declined",  value: declinedAmount, pct: declinedAmount/totalAmount, color: "var(--dim)" },
+    { label: "Declined",  value: declinedAmount, pct: declinedAmount/totalAmount, color: "var(--slate)" },
   ];
 
   return (
     <div>
-      <div className="page-row col-2 mb-16">
+      <div className="page-grid col-2" style={{ marginBottom: 16 }}>
         <div className="card">
           <div className="card-header">
-            <span className="card-title"><span className="dot-indicator dot-blue" />Decision Distribution</span>
+            <span className="card-title"><span className="dot-indicator dot-green" /> Decision Distribution</span>
             <span className="card-meta">by transaction count</span>
           </div>
           <div className="card-body">
@@ -805,9 +783,7 @@ function AnalyticsPage({ stats, txns, alerts, config }) {
               {statusBars.map(({ label, value, pct, color }) => (
                 <div key={label} className="bar-row">
                   <div className="bar-label">{label}</div>
-                  <div className="bar-track">
-                    <div className="bar-fill" style={{ width: `${pct * 100}%`, background: color }} />
-                  </div>
+                  <div className="bar-track"><div className="bar-fill" style={{ width: `${pct * 100}%`, background: color }} /></div>
                   <div className="bar-value">{value.toLocaleString()}</div>
                 </div>
               ))}
@@ -817,7 +793,7 @@ function AnalyticsPage({ stats, txns, alerts, config }) {
 
         <div className="card">
           <div className="card-header">
-            <span className="card-title"><span className="dot-indicator dot-green" />Amount Distribution</span>
+            <span className="card-title"><span className="dot-indicator dot-green" /> Amount Distribution</span>
             <span className="card-meta">by transaction value</span>
           </div>
           <div className="card-body">
@@ -825,10 +801,8 @@ function AnalyticsPage({ stats, txns, alerts, config }) {
               {amountBars.map(({ label, value, pct, color }) => (
                 <div key={label} className="bar-row">
                   <div className="bar-label">{label}</div>
-                  <div className="bar-track">
-                    <div className="bar-fill" style={{ width: `${pct * 100}%`, background: color }} />
-                  </div>
-                  <div className="bar-value mono" style={{ fontSize: 10 }}>{formatINR(value).replace("₹", "₹")}</div>
+                  <div className="bar-track"><div className="bar-fill" style={{ width: `${pct * 100}%`, background: color }} /></div>
+                  <div className="bar-value mono" style={{ fontSize: 10 }}>{formatINR(value)}</div>
                 </div>
               ))}
             </div>
@@ -836,44 +810,26 @@ function AnalyticsPage({ stats, txns, alerts, config }) {
         </div>
       </div>
 
-      <div className="page-row col-3 mb-16">
-        <div className="kpi-card green">
-          <div className="kpi-label">Total Processed</div>
-          <div className="kpi-value sm">{formatINR(appliedAmount)}</div>
-          <div className="kpi-sub">settled transactions</div>
-        </div>
-        <div className="kpi-card red">
-          <div className="kpi-label">Funds Protected</div>
-          <div className="kpi-value sm">{formatINR(blockedAmount + declinedAmount)}</div>
-          <div className="kpi-sub">blocked + declined</div>
-        </div>
-        <div className="kpi-card amber">
-          <div className="kpi-label">Pending Settlement</div>
-          <div className="kpi-value sm">{formatINR(heldAmount)}</div>
-          <div className="kpi-sub">held · awaiting review</div>
-        </div>
-      </div>
-
       <div className="card">
         <div className="card-header">
-          <span className="card-title"><span className="dot-indicator dot-purple" />Risk Policy</span>
+          <span className="card-title"><span className="dot-indicator dot-green" /> Risk Policy</span>
           <span className="card-meta">live from backend configuration</span>
         </div>
         <div className="card-body">
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
             {[
-              { label: "LOW Threshold", value: formatPct(lowT), note: "score < threshold → APPROVE" },
-              { label: "HIGH Threshold", value: formatPct(highT), note: "score > threshold → BLOCK" },
+              { label: "LOW Threshold", value: formatPct(lowT), note: "score < threshold \u2192 APPROVE" },
+              { label: "HIGH Threshold", value: formatPct(highT), note: "score > threshold \u2192 BLOCK" },
             ].map(({ label, value, note }) => (
-              <div key={label} style={{ background: "var(--panel-2)", borderRadius: "var(--radius-sm)", padding: "12px 14px", border: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 10, color: "var(--dim)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>{label}</div>
-                <div style={{ fontFamily: "var(--mono)", fontSize: 18, fontWeight: 700 }}>{value}</div>
-                <div style={{ fontSize: 10, color: "var(--dim)", marginTop: 3 }}>{note}</div>
+              <div key={label} className="rule-panel">
+                <div style={{ fontSize: 9, color: "var(--slate)", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 3 }}>{label}</div>
+                <div style={{ fontFamily: "var(--mono)", fontSize: 17, fontWeight: 700 }}>{value}</div>
+                <div style={{ fontSize: 9.5, color: "var(--slate)", marginTop: 2 }}>{note}</div>
               </div>
             ))}
           </div>
-          <div style={{ marginTop: 12, fontSize: 11, color: "var(--dim)", fontFamily: "var(--mono)" }}>
-            Risk Score = estimated fraud probability from the ML model. The risk classification and action are driven solely by the model score against the configured policy thresholds. Risk reasons are heuristic feature explanations (late-night hour, velocity burst, amount spike) — not mathematical SHAP attributions.
+          <div style={{ marginTop: 12, fontSize: 10.5, color: "var(--slate)", fontFamily: "var(--mono)" }}>
+            Risk Score = estimated fraud probability from the ML model. Risk classification is driven solely by the model score against the configured policy thresholds.
           </div>
         </div>
       </div>
@@ -885,15 +841,17 @@ function AccountsPage({ balances }) {
   const totalBalance = balances.reduce((s, a) => s + Number(a.balance), 0);
   return (
     <div>
-      <div className="kpi-card green mb-16" style={{ maxWidth: 320 }}>
-        <div className="kpi-label">Total System Balance</div>
-        <div className="kpi-value sm">{formatINR(totalBalance)}</div>
-        <div className="kpi-sub">{balances.length} accounts · conserved</div>
+      <div className="card" style={{ maxWidth: 300, marginBottom: 16 }}>
+        <div className="card-body">
+          <div className="kpi-value sm emerald">{formatINR(totalBalance)}</div>
+          <div style={{ fontSize: 10.5, color: "var(--slate)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700, marginBottom: 4 }}>Total System Balance</div>
+          <div className="kpi-sub">{balances.length} accounts {"\u00B7"} conserved</div>
+        </div>
       </div>
       <div className="card">
         <div className="card-header">
-          <span className="card-title"><span className="dot-indicator dot-green" />Account Ledger</span>
-          <span className="card-meta">{balances.length} accounts · live PostgreSQL</span>
+          <span className="card-title"><span className="dot-indicator dot-green" /> Account Ledger</span>
+          <span className="card-meta">{balances.length} accounts {"\u00B7"} live PostgreSQL</span>
         </div>
         <div className="table-wrap">
           <table className="data-table">
@@ -907,24 +865,20 @@ function AccountsPage({ balances }) {
             <tbody>
               {balances.map((a, i) => (
                 <tr key={a.account_id}>
-                  <td className="dim" style={{ fontSize: 11 }}>{i + 1}</td>
+                  <td className="dim" style={{ fontSize: 10.5 }}>{i + 1}</td>
                   <td className="mono" style={{ fontWeight: 600 }}>{a.account_id}</td>
-                  <td className="mono t-right" style={{ fontWeight: 700, color: "var(--green)" }}>
-                    {formatINR(a.balance)}
-                  </td>
+                  <td className="mono t-right" style={{ fontWeight: 700, color: "var(--green-text)" }}>{formatINR(a.balance)}</td>
                 </tr>
               ))}
               <tr>
-                <td colSpan={2} style={{ fontWeight: 700, paddingTop: 12 }}>Total</td>
-                <td className="mono t-right" style={{ fontWeight: 800, fontSize: 15, paddingTop: 12, borderTop: "1px solid var(--border-2)", color: "var(--brand-dark)" }}>
-                  {formatINR(totalBalance)}
-                </td>
+                <td colSpan={2} style={{ fontWeight: 700, paddingTop: 10 }}>Total</td>
+                <td className="mono t-right" style={{ fontWeight: 800, fontSize: 14, paddingTop: 10, borderTop: "1px solid var(--cream-3)", color: "var(--charcoal)" }}>{formatINR(totalBalance)}</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <div style={{ padding: "10px 16px 14px", fontSize: 11, color: "var(--dim)", fontFamily: "var(--mono)", borderTop: "1px solid var(--border)" }}>
-          Balance conservation verified · SUM(balance) computed live from the database: {formatINR(totalBalance)}
+        <div style={{ padding: "8px 14px 12px", fontSize: 10.5, color: "var(--slate)", fontFamily: "var(--mono)", borderTop: "1px solid var(--cream-3)" }}>
+          Balance conservation verified {"\u00B7"} SUM(balance) computed live: {formatINR(totalBalance)}
         </div>
       </div>
     </div>
@@ -943,31 +897,29 @@ function SystemHealthPage({ lag, connected, stats, onSeed, seeding, config }) {
 
   return (
     <div>
-      <div className="health-grid mb-20">
+      <div className="health-grid">
         {[
-          { name: "API Server",        meta: "Express",                    ok: connected },
-          { name: "PostgreSQL",         meta: "ledgerstore database",       ok: connected },
-          { name: "Kafka Broker",       meta: "transactions topic",         ok: connected },
-          { name: "AI Risk Engine",     meta: "XGBoost inline scoring",     ok: connected },
-          { name: "Ledger Consumer",    meta: "ledger-consumer-group",      ok: connected },
-          { name: "Fraud Consumer",     meta: "fraud-consumer-group",       ok: connected },
+          { name: "API Server",        meta: "Express",                ok: connected },
+          { name: "PostgreSQL",        meta: "ledgerstore database",   ok: connected },
+          { name: "Kafka Broker",      meta: "transactions topic",     ok: connected },
+          { name: "ML Risk Engine",    meta: "RandomForest V4 inline", ok: connected },
+          { name: "Ledger Consumer",   meta: "ledger-consumer-group",  ok: connected },
+          { name: "Fraud Consumer",    meta: "fraud-consumer-group",   ok: connected },
         ].map(({ name, meta, ok }) => (
-          <div key={name} className="health-item">
-            <div className="health-item-info">
-              <div className="health-item-name">{name}</div>
-              <div className="health-item-meta">{meta}</div>
+          <div key={name} className="health-card">
+            <div className="health-card-info">
+              <div className="health-card-name">{name}</div>
+              <div className="health-card-meta">{meta}</div>
             </div>
-            <span className={`badge ${ok ? "badge-green" : "badge-red"}`}>
-              {ok ? "● Operational" : "● Offline"}
-            </span>
+            <span className={`badge ${ok ? "badge-green" : "badge-red"}`}>{ok ? "\u25CF Operational" : "\u25CF Offline"}</span>
           </div>
         ))}
       </div>
 
-      <div className="page-row col-2 mb-16">
+      <div className="page-grid col-2" style={{ marginBottom: 16 }}>
         <div className="card">
           <div className="card-header">
-            <span className="card-title"><span className="dot-indicator dot-blue" />Consumer Lag</span>
+            <span className="card-title"><span className="dot-indicator dot-green" /> Consumer Lag</span>
             <span className="card-meta">Kafka offset lag</span>
           </div>
           <div className="card-body">
@@ -976,12 +928,12 @@ function SystemHealthPage({ lag, connected, stats, onSeed, seeding, config }) {
               { label: "Fraud Consumer",  lag: fraudLag,  data: lag?.fraud },
             ].map(({ label, lag: l, data }) => (
               <div key={label} style={{ marginBottom: 16 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                  <span style={{ fontSize: 12.5, fontWeight: 600 }}>{label}</span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{label}</span>
                   {lagBadge(l)}
                 </div>
-                <div style={{ fontSize: 11, color: "var(--dim)", fontFamily: "var(--mono)" }}>
-                  log-end: {Number(data?.logEnd ?? 0).toLocaleString()} · committed: {Number(data?.committed ?? 0).toLocaleString()}
+                <div style={{ fontSize: 10.5, color: "var(--slate)", fontFamily: "var(--mono)" }}>
+                  log-end: {Number(data?.logEnd ?? 0).toLocaleString()} {"\u00B7"} committed: {Number(data?.committed ?? 0).toLocaleString()}
                 </div>
               </div>
             ))}
@@ -990,21 +942,21 @@ function SystemHealthPage({ lag, connected, stats, onSeed, seeding, config }) {
 
         <div className="card">
           <div className="card-header">
-            <span className="card-title"><span className="dot-indicator dot-purple" />Processing Architecture</span>
+            <span className="card-title"><span className="dot-indicator dot-green" /> Processing Architecture</span>
             <span className="card-meta">pipeline design</span>
           </div>
           <div className="card-body">
             {[
-              { label: "Ingestion",        value: "Kafka transactions topic" },
-              { label: "Feature Extraction", value: "amount · hour · velocity" },
-              { label: "Risk Engine",       value: "XGBoost fraud probability" },
-              { label: "Decision",          value: `policy thresholds ${formatPct(config?.riskPolicy?.lowThreshold ?? 0.01)} / ${formatPct(config?.riskPolicy?.highThreshold ?? 0.05)}` },
-              { label: "Persistence",       value: "PostgreSQL (balance-safe)" },
-              { label: "Commit Order",      value: "PostgreSQL → Kafka" },
+              { label: "Ingestion",          value: "Kafka transactions topic" },
+              { label: "Feature Extraction", value: "amount \u00B7 hour \u00B7 velocity \u00B7 amount_ratio" },
+              { label: "Risk Engine",        value: "RandomForest V4 fraud probability" },
+              { label: "Decision",           value: `policy thresholds ${formatPct(config?.riskPolicy?.lowThreshold ?? 0.01)} / ${formatPct(config?.riskPolicy?.highThreshold ?? 0.10)}` },
+              { label: "Persistence",        value: "PostgreSQL (balance-safe)" },
+              { label: "Commit Order",       value: "PostgreSQL \u2192 Kafka" },
             ].map(({ label, value }) => (
-              <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid var(--border)" }}>
-                <span style={{ fontSize: 12, color: "var(--dim)" }}>{label}</span>
-                <span style={{ fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600 }}>{value}</span>
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid var(--cream-3)" }}>
+                <span style={{ fontSize: 11.5, color: "var(--slate)" }}>{label}</span>
+                <span style={{ fontSize: 11.5, fontFamily: "var(--mono)", fontWeight: 600 }}>{value}</span>
               </div>
             ))}
           </div>
@@ -1013,43 +965,38 @@ function SystemHealthPage({ lag, connected, stats, onSeed, seeding, config }) {
 
       <div className="card">
         <div className="card-header">
-          <span className="card-title"><span className="dot-indicator dot-green" />Database Integrity</span>
+          <span className="card-title"><span className="dot-indicator dot-green" /> Database Integrity</span>
           <span className="card-meta">SUM(balance) conservation</span>
         </div>
         <div className="card-body">
-          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
             {[
-              { label: "Balance Conservation", value: "checked live in Accounts", ok: true },
-              { label: "Idempotency Guard", value: "processed_events UNIQUE", ok: true },
-              { label: "Row Locking", value: "SELECT FOR UPDATE", ok: true },
-              { label: "Crash Safety", value: "DB COMMIT → Kafka COMMIT", ok: true },
-            ].map(({ label, value, ok }) => (
-              <div key={label} style={{ flex: "1 1 200px", background: "var(--panel-2)", borderRadius: "var(--radius-sm)", padding: "12px 14px", border: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 10, color: "var(--dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4, fontWeight: 600 }}>{label}</div>
-                <div style={{ fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600 }}>{value}</div>
-                {ok && <div style={{ fontSize: 10, color: "var(--green)", marginTop: 3 }}>✓ Verified</div>}
+              { label: "Balance Conservation", value: "checked live in Accounts" },
+              { label: "Idempotency Guard",    value: "processed_events UNIQUE" },
+              { label: "Row Locking",          value: "SELECT FOR UPDATE" },
+              { label: "Crash Safety",         value: "DB COMMIT \u2192 Kafka COMMIT" },
+            ].map(({ label, value }) => (
+              <div key={label} className="rule-panel">
+                <div style={{ fontSize: 9, color: "var(--slate)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 3, fontWeight: 700 }}>{label}</div>
+                <div style={{ fontSize: 11.5, fontFamily: "var(--mono)", fontWeight: 600 }}>{value}</div>
+                <div style={{ fontSize: 9.5, color: "var(--green-text)", marginTop: 2 }}>{"\u2713"} Verified</div>
               </div>
             ))}
           </div>
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: 16 }}>
+      <div className="card" style={{ marginTop: 14 }}>
         <div className="card-header">
-          <span className="card-title"><span className="dot-indicator dot-blue" />Demo Administration</span>
+          <span className="card-title"><span className="dot-indicator dot-green" /> Demo Administration</span>
           <span className="card-meta">controlled transaction seeder</span>
         </div>
         <div className="card-body">
-          <p style={{ fontSize: 12.5, color: "var(--dim)", marginBottom: 12 }}>
-            Click the button below to generate generic demo transactions and push them through the live Kafka / PostgreSQL pipeline. Real accounts are selected from the database and amounts are drawn from the configured demo range. The XGBoost model scores each transaction and the risk policy determines the outcome — LOW/MEDIUM/HIGH are decided by the model, never hardcoded.
+          <p style={{ fontSize: 12, color: "var(--slate)", marginBottom: 12 }}>
+            Generate demo transactions and push them through the live Kafka / PostgreSQL pipeline. Accounts and amounts are drawn from the database. The ML model scores each transaction and the risk policy determines the outcome.
           </p>
-          <button 
-            className="btn btn-approve" 
-            onClick={onSeed} 
-            disabled={seeding || !connected}
-            style={{ padding: "8px 16px", background: "var(--purple)", borderColor: "var(--purple)", color: "white" }}
-          >
-            {seeding ? "Generating Events..." : "⚡ Generate Demo Transactions"}
+          <button className="btn btn-approve" onClick={onSeed} disabled={seeding || !connected}>
+            {seeding ? "Generating Events..." : "\u26A1 Generate Demo Transactions"}
           </button>
         </div>
       </div>
@@ -1057,81 +1004,149 @@ function SystemHealthPage({ lag, connected, stats, onSeed, seeding, config }) {
   );
 }
 
-// ─── Sidebar ──────────────────────────────────────────────────────────────────
-function Sidebar({ page, onNav, heldCount, blockedCount, connected }) {
-  const operationsPages = [
-    { name: "Overview", icon: "◈" },
-    { name: "Live Transactions", icon: "↯" },
-    { name: "Review Queue", icon: "⏸" },
-    { name: "Blocked", icon: "⊗" },
-    { name: "Analytics", icon: "◎" },
-    { name: "Accounts", icon: "◉" },
-  ];
-  const infrastructurePages = [
-    { name: "System Health", icon: "⚙" },
-  ];
+function TransactionDrawer({ txn, alerts, txns, onAction, actionPending, onClose, config }) {
+  if (!txn) return null;
+
+  const alert = alerts.find((a) => a.event_id === txn.event_id);
+  const txnState = txns.find((t) => t.event_id === txn.event_id);
+  const status = txnState ? txnState.status : txn.status;
+  const score = (txnState?.risk_score != null) ? Number(txnState.risk_score) : (alert ? alert.risk_score : null);
+  const level = txnState?.risk_level || (alert ? alert.risk_level : "LOW");
+  const reasons = txnState?.reasons ? txnState.reasons.split(" \u00B7 ") : (alert ? alert.reasons : []);
+
+  const moneyMoved = status === "applied";
+  const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
+  const highT = config?.riskPolicy?.highThreshold ?? 0.10;
 
   return (
-    <nav className="sidebar">
-      <div className="sidebar-brand">
-        <div className="sidebar-brand-name">
-          LedgerStream <span className="brand-accent">RM</span>
-          <span className="sidebar-brand-badge">PROD</span>
+    <div className="drawer-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="drawer">
+        <div className="drawer-header">
+          <span className="drawer-title">Transaction Detail</span>
+          <button className="drawer-close" onClick={onClose}>Close</button>
         </div>
-        <div className="sidebar-brand-sub">Payment Risk Management</div>
-      </div>
 
-      <div className="sidebar-nav">
-        <div className="nav-section-label">OPERATIONS</div>
-        {operationsPages.map((item) => (
-          <button
-            key={item.name}
-            className={`nav-item ${page === item.name ? "active" : ""}`}
-            onClick={() => onNav(item.name)}
-          >
-            <span className="nav-item-icon">{item.icon}</span>
-            {item.name}
-            {item.name === "Review Queue" && heldCount > 0 && (
-              <span className="nav-item-badge amber">{heldCount}</span>
-            )}
-            {item.name === "Blocked" && blockedCount > 0 && (
-              <span className="nav-item-badge">{blockedCount}</span>
-            )}
-          </button>
-        ))}
+        <div className="drawer-body">
+          {score != null && (
+            <div className="detail-section">
+              <div className="detail-section-title">Risk Decision</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                {levelBadge(level)}
+                <span style={{ fontSize: 10, color: "var(--slate)", fontFamily: "var(--mono)" }}>
+                  {level === "HIGH" ? "BLOCK" : level === "MEDIUM" ? "VERIFY" : "APPROVE"}
+                </span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-key">Risk Score</span>
+                <span className="detail-val" style={{ fontSize: 18, fontVariantNumeric: "tabular-nums" }}>{formatPct(score)}</span>
+              </div>
+              <div className="risk-score-bar">
+                <div className={`risk-score-fill ${riskFillClass(level)}`} style={{ width: `${Math.min(score * 100, 100)}%` }} />
+              </div>
+              <div className="detail-row">
+                <span className="detail-key">Threshold</span>
+                <span className="detail-val" style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{formatPct(level === "HIGH" ? highT : lowT)}</span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-key">Decision</span>
+                <span className="detail-val" style={{ fontWeight: 700 }}>
+                  {level === "HIGH" ? "BLOCKED" : level === "MEDIUM" ? "HELD" : "APPROVED"}
+                </span>
+              </div>
+            </div>
+          )}
 
-        <div className="nav-section-label" style={{ marginTop: 14 }}>INFRASTRUCTURE</div>
-        {infrastructurePages.map((item) => (
-          <button
-            key={item.name}
-            className={`nav-item ${page === item.name ? "active" : ""}`}
-            onClick={() => onNav(item.name)}
-          >
-            <span className="nav-item-icon">{item.icon}</span>
-            {item.name}
-          </button>
-        ))}
-      </div>
+          {reasons && reasons.length > 0 && (
+            <div className="detail-section">
+              <div className="detail-section-title">Signals</div>
+              {reasons.map((r, i) => (
+                <div key={i} style={{ fontSize: 11.5, color: "var(--charcoal)", padding: "5px 0", borderBottom: "1px solid var(--cream-3)" }}>
+                  {"\u2022"} {r}
+                </div>
+              ))}
+            </div>
+          )}
 
-      <div className="sidebar-footer">
-        <div className="sidebar-status-item">
-          <span>AI Risk Engine</span>
-          <span><span className={`status-dot ${connected ? "live" : "dead"}`} />{connected ? "Operational" : "Offline"}</span>
+          <div className="detail-section">
+            <div className="detail-section-title">Transaction</div>
+            <div className="detail-row">
+              <span className="detail-key">Event ID</span>
+              <span className="detail-val mono" style={{ fontSize: 10, color: "var(--slate)" }}>{txn.event_id}</span>
+            </div>
+            <div className="detail-row">
+              <span className="detail-key">Amount</span>
+              <span className="detail-val" style={{ fontSize: 20, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{formatINR(txn.amount)}</span>
+            </div>
+            <div className="detail-row">
+              <span className="detail-key">Transfer</span>
+              <span className="detail-val mono">{txn.from_account} {"\u2192"} {txn.to_account}</span>
+            </div>
+            <div className="detail-row">
+              <span className="detail-key">Amount Band</span>
+              <span className="detail-val">{amountBandBadge(txn.amount_band || amountBandFor(txn.amount, config))}</span>
+            </div>
+            <div className="detail-row">
+              <span className="detail-key">Timestamp</span>
+              <span className="detail-val">{timeAgo(txn.created_at)}</span>
+            </div>
+          </div>
+
+          <div className="detail-section">
+            <div className="detail-section-title">Settlement</div>
+            <div className="detail-row">
+              <span className="detail-key">Status</span>
+              <span className="detail-val">{statusBadge(status)}</span>
+            </div>
+            <div className={`money-moved-box ${moneyMoved ? "yes" : "no"}`} style={{ marginTop: 4 }}>
+              {moneyMoved ? "\u2713" : "\u2717"} MONEY MOVED: {moneyMoved ? "YES \u2014 Settlement complete" : "NO \u2014 Money protected"}
+            </div>
+          </div>
         </div>
-        <div className="sidebar-status-item">
-          <span>Kafka Stream</span>
-          <span><span className={`status-dot ${connected ? "live" : "dead"}`} />{connected ? "Connected" : "Offline"}</span>
-        </div>
-        <div className="sidebar-status-item">
-          <span>PostgreSQL</span>
-          <span><span className={`status-dot ${connected ? "live" : "dead"}`} />{connected ? "Connected" : "Offline"}</span>
-        </div>
+
+        {status === "held" && (
+          <div className="drawer-actions">
+            <button className="btn btn-approve" style={{ flex: 1 }} disabled={actionPending} onClick={() => onAction(txn.event_id, "approve")}>
+              {actionPending ? "Processing..." : "\u2713 Approve & Settle"}
+            </button>
+            <button className="btn btn-decline" style={{ flex: 1 }} disabled={actionPending} onClick={() => onAction(txn.event_id, "decline")}>
+              {"\u2715"} Decline
+            </button>
+          </div>
+        )}
+        {status === "blocked" && (
+          <div className="drawer-blocked-notice">
+            <div className="blocked-notice-box">{"\u2297"} Blocked {"\u2014"} No analyst action available</div>
+          </div>
+        )}
+        {status === "applied" && (
+          <div className="drawer-blocked-notice">
+            <div className="blocked-notice-box" style={{ background: "var(--green-bg)", border: "1px solid var(--green-bd)", color: "var(--green-text)" }}>{"\u2713"} Approved & Settled</div>
+          </div>
+        )}
+        {status === "declined" && (
+          <div className="drawer-blocked-notice">
+            <div className="blocked-notice-box" style={{ background: "var(--cream-2)", border: "1px solid var(--cream-3)", color: "var(--slate)" }}>{"\u2715"} Declined by Analyst</div>
+          </div>
+        )}
       </div>
-    </nav>
+    </div>
   );
 }
 
-// ─── Main App ────────────────────────────────────────────────────────────────
+function Footer() {
+  return (
+    <div className="footer">
+      <div className="footer-inner">
+        <div className="footer-brand">
+          <div className="brand-mark" style={{ width: 22, height: 22, fontSize: 9 }}>LS</div>
+          Ledger<em>Stream</em> RM
+        </div>
+        <div className="footer-copy">Real-time transaction risk management {"\u00B7"} Razorpay Buildathon Track 02</div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [page, setPage] = useState("Overview");
   const [balances, setBalances] = useState([]);
@@ -1141,27 +1156,13 @@ export default function App() {
   const [stats, setStats] = useState(null);
   const [config, setConfig] = useState(null);
   const [connected, setConnected] = useState(false);
-  const [lastRefresh, setLastRefresh] = useState(null);
   const [error, setError] = useState(null);
   const [selectedTxnId, setSelectedTxnId] = useState(null);
   const [actionPending, setActionPending] = useState(false);
   const [seeding, setSeeding] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [timeRange, setTimeRange] = useState("24H");
 
-  async function handleSeedDemoData() {
-    setSeeding(true);
-    try {
-      const res = await fetch("/api/admin/seed-demo", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      addToast("success", `Seeded ${data.count} controlled demo transactions via Kafka/XGBoost successfully.`);
-      await refreshData();
-    } catch (e) {
-      addToast("error", `Seeding failed: ${e.message}`);
-    } finally {
-      setSeeding(false);
-    }
-  }
   const toastId = useRef(0);
 
   function addToast(type, msg) {
@@ -1172,6 +1173,21 @@ export default function App() {
 
   function dismissToast(id) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  }
+
+  async function handleSeedDemoData() {
+    setSeeding(true);
+    try {
+      const res = await fetch("/api/admin/seed-demo", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      addToast("success", `Seeded ${data.count} demo transactions via Kafka pipeline.`);
+      await refreshData();
+    } catch (e) {
+      addToast("error", `Seeding failed: ${e.message}`);
+    } finally {
+      setSeeding(false);
+    }
   }
 
   const refreshData = useCallback(async () => {
@@ -1192,7 +1208,6 @@ export default function App() {
       setConfig(c);
       setConnected(true);
       setError(null);
-      setLastRefresh(new Date());
     } catch (e) {
       setConnected(false);
       setError(e.message);
@@ -1221,7 +1236,6 @@ export default function App() {
     }
   }
 
-  // Build the detail txn object
   const selectedTxn = txns.find((t) => t.event_id === selectedTxnId) ||
                        (() => {
                          const a = alerts.find((x) => x.event_id === selectedTxnId);
@@ -1231,81 +1245,47 @@ export default function App() {
 
   const heldCount    = txns.filter((t) => t.status === "held").length;
   const blockedCount = txns.filter((t) => t.status === "blocked").length;
-  const ledgerLag    = lag?.ledger?.lag ?? 0;
 
-  const liveTone = !connected ? "offline" : "live";
-  const liveLabel = !connected ? "OFFLINE" : "SYSTEM ONLINE";
+  function scrollTop() {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   return (
-    <div className="app-shell">
-      <Sidebar
-        page={page}
-        onNav={setPage}
-        heldCount={heldCount}
-        blockedCount={blockedCount}
-        connected={connected}
-      />
+    <div className="app">
+      <TopNav page={page} onNav={(p) => { setPage(p); scrollTop(); }} heldCount={heldCount} blockedCount={blockedCount} connected={connected} />
 
-      <div className="main-area">
-        {/* Top header */}
-        <header className="topbar">
-          <div className="topbar-left">
-            <div className="topbar-title">{page}</div>
-            <div className="topbar-sub">{PAGE_SUBS[page]}</div>
-          </div>
-          <div className="topbar-right">
-            <span className="refresh-time">
-              {lastRefresh ? `Last updated: ${timeAgo(lastRefresh.toISOString())}` : "connecting…"}
-            </span>
-            <span className={`live-pill ${liveTone}`}>
-              <span className="status-dot live" style={liveTone !== "live" ? { background: "var(--red)", animation: "none" } : {}} />
-              {connected ? "System operational" : "System offline"}
-            </span>
-            <button className="icon-btn" onClick={refreshData} title="Refresh">↺</button>
-          </div>
-        </header>
+      {error && (
+        <div className="error-banner">
+          {"\u26A0"} API unreachable: {error} {"\u2014"} retrying every {POLL_MS / 1000}s
+        </div>
+      )}
 
-        {/* Error banner */}
-        {error && (
-          <div className="error-banner">
-            ⚠ API unreachable: {error} — retrying every {POLL_MS / 1000}s
+      {page === "Overview" ? (
+        <OverviewPage
+          stats={stats} txns={txns} alerts={alerts} config={config}
+          lag={lag} balances={balances}
+          onSelectTxn={(id) => setSelectedTxnId(id)}
+          onRefresh={() => refreshData()}
+          timeRange={timeRange} onTimeRange={setTimeRange}
+          connected={connected}
+        />
+      ) : (
+        <div className="content" style={{ paddingTop: 28 }}>
+          <div className="content-head">
+            <div>
+              <div className="content-head-title">{page}</div>
+              <div className="content-head-sub">{PAGE_SUBS[page]}</div>
+            </div>
           </div>
-        )}
 
-        {/* Page content */}
-        <main className="page-content">
-          {page === "Overview" && (
-            <OverviewPage
-              stats={stats}
-              alerts={alerts}
-              txns={txns}
-              balances={balances}
-              connected={connected}
-              config={config}
-              onSelectTxn={(id) => setSelectedTxnId(id)}
-            />
+          {page === "Transactions" && (
+            <LiveTransactionsPage txns={txns} alerts={alerts} config={config} onSelectTxn={(id) => setSelectedTxnId(id)} selectedTxnId={selectedTxnId} />
           )}
-          {page === "Live Transactions" && (
-            <LiveTransactionsPage
-              txns={txns}
-              alerts={alerts}
-              config={config}
-              onSelectTxn={(id) => setSelectedTxnId(id)}
-              selectedTxnId={selectedTxnId}
-            />
+          {page === "Risk Intelligence" && (
+            <ReviewQueuePage txns={txns} alerts={alerts} config={config} onAction={handleAction} actionPending={actionPending} onSelectTxn={(id) => setSelectedTxnId(id)} />
           )}
-          {page === "Review Queue" && (
-            <ReviewQueuePage
-              txns={txns}
-              alerts={alerts}
-              config={config}
-              onAction={handleAction}
-              actionPending={actionPending}
-              onSelectTxn={(id) => setSelectedTxnId(id)}
-            />
-          )}
-          {page === "Blocked" && (
-            <BlockedPage txns={txns} alerts={alerts} config={config} />
+          {page === "Alerts" && (
+            <BlockedPage txns={txns} alerts={alerts} config={config} stats={stats} />
           )}
           {page === "Analytics" && (
             <AnalyticsPage stats={stats} txns={txns} alerts={alerts} config={config} />
@@ -1316,10 +1296,11 @@ export default function App() {
           {page === "System Health" && (
             <SystemHealthPage lag={lag} connected={connected} stats={stats} config={config} onSeed={handleSeedDemoData} seeding={seeding} />
           )}
-        </main>
-      </div>
+        </div>
+      )}
 
-      {/* Transaction detail drawer */}
+      <Footer />
+
       {selectedTxnId && selectedTxn && (
         <TransactionDrawer
           txn={selectedTxn}
@@ -1332,7 +1313,6 @@ export default function App() {
         />
       )}
 
-      {/* Toast notifications */}
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );

@@ -1,2 +1,4 @@
-Set-Location "C:\my_projects_main\LedgerStream\ledgerstream\ledgerstream\frontend"
-& npm run dev *> "C:\my_projects_main\LedgerStream\frontend.log"
+# Local dev launcher for the Vite React frontend (dev server).
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location (Join-Path $Root "ledgerstream\ledgerstream\frontend")
+& npm run dev *> (Join-Path $Root "frontend.log")
