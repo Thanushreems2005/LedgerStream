@@ -6,12 +6,14 @@ import {
   fetchLag,
   fetchStats,
   fetchConfig,
+  sendTransaction,
 } from "./api";
 
 const POLL_MS = 2500;
 
 const NAV = [
   { key: "Overview", label: "Overview" },
+  { key: "Send Transaction", label: "Send" },
   { key: "Transactions", label: "Transactions" },
   { key: "Risk Intelligence", label: "Risk Intelligence" },
   { key: "Analytics", label: "Analytics" },
@@ -23,6 +25,7 @@ const PAGES = ["Accounts", "System Health"];
 
 const PAGE_SUBS = {
   Overview:              "Real-time transaction risk monitoring",
+  "Send Transaction":    "Manual payment with a live AI risk decision",
   Transactions:          "Payment operations console",
   "Risk Intelligence":   "MEDIUM risk payments awaiting analyst action",
   Alerts:                "HIGH risk payments stopped before settlement",
@@ -191,7 +194,53 @@ function TopNav({ page, onNav, heldCount, blockedCount, connected }) {
   );
 }
 
-function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn, onRefresh, timeRange, onTimeRange, connected, onNav }) {
+function DemoControl({ onSeed, seeding, demo, connected }) {
+  const last = demo?.lastTxn;
+  const processing = demo?.status === "processing";
+  return (
+    <div className="demo-control">
+      <div className="demo-control-main">
+        <button
+          className="btn btn-approve demo-seed-btn"
+          onClick={onSeed}
+          disabled={seeding || !connected}
+        >
+          {processing ? "Processing…" : "\u26A1 Generate Test Transaction"}
+        </button>
+        <span className="demo-hint">
+          publishes one real event {"\u2192"} Kafka {"\u2192"} ML risk scoring {"\u2192"} policy {"\u2192"} PostgreSQL
+        </span>
+      </div>
+      {processing && (
+        <div className="demo-status demo-status-processing">
+          <span className="demo-status-item">{"\u26A0"} Processing new transaction through the live pipeline…</span>
+        </div>
+      )}
+      {last && !processing && (
+        <div className="demo-status">
+          <span className="demo-status-title">Last transaction processed</span>
+          <span className="demo-status-item">
+            {timeAgo(last.created_at)}
+          </span>
+          <span className="demo-status-item">
+            Risk score: <b>{last.risk_score != null ? formatPct(last.risk_score) : "\u2014"}</b>
+          </span>
+          <span className="demo-status-item">
+            Decision: {statusBadge(last.decision)} {levelBadge(last.risk_level)}
+          </span>
+          <span className="demo-status-item mono dim">{last.event_id}</span>
+        </div>
+      )}
+      {demo?.status === "error" && (
+        <div className="demo-status demo-status-error">
+          <span className="demo-status-item">{"\u26A0"} {demo.error}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn, onRefresh, refreshing, timeRange, onTimeRange, connected, onNav, onSeed, seeding, demo, recentlySent }) {
   const dashboardRef = useRef(null);
   const rangeTxns = txns.filter((t) => inRange(t.created_at, timeRange));
   const applied  = Number(stats?.appliedCount  ?? 0);
@@ -205,7 +254,7 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
 
   let liveScore = null;
   let liveLevel = "LOW";
-  const latest = txns[0] || alerts[0] || null;
+  const latest = rangeTxns[0] || txns[0] || alerts[0] || null;
   if (latest?.risk_score != null) {
     liveScore = Number(latest.risk_score);
     liveLevel = latest.risk_level || (latest.status === "blocked" ? "HIGH" : latest.status === "held" ? "MEDIUM" : "LOW");
@@ -329,9 +378,13 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
               {["1H", "6H", "24H", "7D", "30D"].map((r) => (
                 <button key={r} className={`time-chip${timeRange === r ? " active" : ""}`} onClick={() => onTimeRange(r)}>{r}</button>
               ))}
-              <button className="refresh-chip" onClick={onRefresh} title="Refresh">↻ Refresh</button>
+              <button className={`refresh-chip${refreshing ? " spinning" : ""}`} onClick={onRefresh} disabled={refreshing} title="Refresh">
+                {refreshing ? "Refreshing…" : "\u21BB Refresh"}
+              </button>
             </div>
           </div>
+
+          <DemoControl onSeed={onSeed} seeding={seeding} demo={demo} connected={connected} />
 
           <div className="kpi-row">
             <div className="kpi-card green">
@@ -409,7 +462,7 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
                   const score = t.risk_score != null ? Number(t.risk_score) : null;
                   const icon = level === "HIGH" ? "⊗" : level === "MEDIUM" ? "⏸" : "✓";
                   return (
-                    <div key={t.event_id} className="txn-item" onClick={() => onSelectTxn(t.event_id)}>
+                    <div key={t.event_id} className={`txn-item ${recentlySent && recentlySent.includes(t.event_id) ? "just-now" : ""}`} onClick={() => onSelectTxn(t.event_id)}>
                       <div className={`txn-icon ${level.toLowerCase()}`}>{icon}</div>
                       <div className="txn-main">
                         <div className="txn-id">{t.event_id.length > 16 ? t.event_id.slice(0, 16) + "…" : t.event_id}</div>
@@ -502,7 +555,7 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
   );
 }
 
-function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config }) {
+function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config, recentlySent }) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [levelFilter, setLevelFilter] = useState("all");
@@ -572,7 +625,7 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
                 const score = t.risk_score != null ? Number(t.risk_score) : null;
                 const band = t.amount_band || amountBandFor(t.amount, config);
                 return (
-                  <tr key={t.event_id} className={`clickable ${t.event_id === selectedTxnId ? "selected" : ""}`} onClick={() => onSelectTxn(t.event_id)}>
+                  <tr key={t.event_id} className={`clickable ${t.event_id === selectedTxnId ? "selected" : ""} ${recentlySent && recentlySent.includes(t.event_id) ? "just-now" : ""}`} onClick={() => onSelectTxn(t.event_id)}>
                     <td className="mono dim" style={{ fontSize: 10.5 }}>{t.event_id.length > 14 ? t.event_id.slice(0, 14) + "…" : t.event_id}</td>
                     <td style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatINR(t.amount)}</td>
                     <td>{amountBandBadge(band)}</td>
@@ -826,10 +879,10 @@ function AnalyticsPage({ stats, txns, alerts, config }) {
   const declined = Number(stats?.declinedCount ?? 0);
   const total    = applied + held + blocked + declined || 1;
 
-  const appliedAmount  = txns.filter((t) => t.status === "applied").reduce((s, t) => s + Number(t.amount), 0);
-  const blockedAmount  = txns.filter((t) => t.status === "blocked").reduce((s, t) => s + Number(t.amount), 0);
-  const heldAmount     = txns.filter((t) => t.status === "held").reduce((s, t) => s + Number(t.amount), 0);
-  const declinedAmount = txns.filter((t) => t.status === "declined").reduce((s, t) => s + Number(t.amount), 0);
+  const appliedAmount  = Number(stats?.appliedValue  ?? 0);
+  const blockedAmount  = Number(stats?.blockedValue  ?? 0);
+  const heldAmount     = Number(stats?.heldValue     ?? 0);
+  const declinedAmount = Number(stats?.declinedValue ?? 0);
   const totalAmount    = appliedAmount + blockedAmount + heldAmount + declinedAmount || 1;
 
   const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
@@ -912,6 +965,193 @@ function AnalyticsPage({ stats, txns, alerts, config }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function SendTransactionPage({ balances, config, connected, onSend, send, onNavigate }) {
+  const [fromId, setFromId] = useState("");
+  const [toId, setToId] = useState("");
+  const [amount, setAmount] = useState("");
+  const [localError, setLocalError] = useState("");
+
+  const accounts = balances || [];
+  const sender = accounts.find((a) => a.account_id === fromId);
+  const processing = send?.status === "processing";
+  const result = send?.status === "done" ? send.result : null;
+  const error = send?.status === "error" ? send.error : null;
+
+  function suggestAmount(acctId) {
+    const a = accounts.find((x) => x.account_id === acctId);
+    if (!a) return;
+    const balance = Number(a.balance) || 0;
+    const max = Math.min(balance, 20000);
+    const guess = Math.max(10, Math.round(max * (0.1 + Math.random() * 0.6)));
+    setAmount(String(guess));
+  }
+
+  function validateForm() {
+    if (!fromId) return "Select a sender account";
+    if (!toId) return "Select a receiver account";
+    if (fromId === toId) return "Sender and receiver must be different accounts";
+    const v = Number(amount);
+    if (!Number.isFinite(v) || v <= 0) return "Enter a valid amount greater than zero";
+    return "";
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    const ve = validateForm();
+    setLocalError(ve);
+    if (ve) return;
+    await onSend({ from: fromId, to: toId, amount: Number(amount) });
+  }
+
+  const moneyMoved = result && result.status === "applied";
+
+  return (
+    <div>
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title"><span className="dot-indicator dot-green" /> Initiate a Payment</span>
+          <span className="card-meta">manual transfer through the live pipeline</span>
+        </div>
+        <div className="card-body">
+          <p style={{ fontSize: 12, color: "var(--slate)", marginBottom: 14 }}>
+            The account pair and amount are validated against live PostgreSQL balances, then the event is
+            pushed to Kafka. The random forest engine scores it and the policy decides the outcome before money moves:
+          </p>
+          <div className="send-policy-row">
+            <span className="send-policy-tag low">{"\u2713"} LOW {"\u2192"} APPROVE &amp; SETTLE</span>
+            <span className="send-policy-tag medium">{"\u23F8"} MEDIUM {"\u2192"} HELD FOR REVIEW</span>
+            <span className="send-policy-tag high">{"\u2297"} HIGH {"\u2192"} BLOCKED</span>
+          </div>
+
+          <form className="send-form" onSubmit={handleSubmit}>
+            <div className="send-field">
+              <label className="send-label">From Account</label>
+              <select
+                className="filter-input send-select"
+                value={fromId}
+                onChange={(e) => { setFromId(e.target.value); setLocalError(""); }}
+                disabled={processing}
+              >
+                <option value="">Select sender\u2026</option>
+                {accounts.map((a) => (
+                  <option key={a.account_id} value={a.account_id}>
+                    {a.account_id} {"\u00B7"} {formatINR(a.balance)}
+                  </option>
+                ))}
+              </select>
+              <span className="send-balance-hint">
+                {sender ? `${sender.account_id} available: ${formatINR(sender.balance)}` : "live balance shown once selected"}
+              </span>
+            </div>
+
+            <div className="send-field">
+              <label className="send-label">To Account</label>
+              <select
+                className="filter-input send-select"
+                value={toId}
+                onChange={(e) => { setToId(e.target.value); setLocalError(""); }}
+                disabled={processing}
+              >
+                <option value="">Select receiver\u2026</option>
+                {accounts.filter((a) => a.account_id !== fromId).map((a) => (
+                  <option key={a.account_id} value={a.account_id}>{a.account_id}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="send-field">
+              <label className="send-label">Amount</label>
+              <div className="send-amount-row">
+                <input
+                  className="filter-input send-amount-input"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={amount}
+                  onChange={(e) => { setAmount(e.target.value); setLocalError(""); }}
+                  placeholder="0.00"
+                  disabled={processing}
+                />
+                <button type="button" className="btn btn-ghost" onClick={() => suggestAmount(fromId)} disabled={processing || !fromId}>
+                  Suggest
+                </button>
+              </div>
+            </div>
+
+            {(localError || error) && (
+              <div className="send-error">{"\u26A0"} {localError || error}</div>
+            )}
+
+            <div className="send-actions">
+              <button className="btn btn-approve" type="submit" disabled={processing || !connected || accounts.length < 2}>
+                {processing ? "Processing\u2026" : "\u2192 Send Transaction"}
+              </button>
+              <span className="send-hint">
+                {connected
+                  ? "publishes to Kafka \u00B7 ML scored \u00B7 persisted in PostgreSQL"
+                  : "API offline \u2014 cannot send"}
+              </span>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      {processing && (
+        <div className="card" style={{ marginTop: 14 }}>
+          <div className="card-body">
+            <div className="send-status send-status-processing">{"\u26A0"} Processing new transaction through the live pipeline\u2026</div>
+          </div>
+        </div>
+      )}
+
+      {result && (
+        <div className="card" style={{ marginTop: 14 }}>
+          <div className="card-header">
+            <span className="card-title"><span className="dot-indicator dot-green" /> Live Decision</span>
+            <span className="card-meta">scored by the ML engine, decided by policy</span>
+          </div>
+          <div className="card-body">
+            <div className={`send-verdict ${result.status}`}>
+              <div className="send-verdict-main">
+                <span className="send-verdict-label">Decision</span>
+                <span className="send-verdict-value">{result.status.toUpperCase()}</span>
+                <span className="send-verdict-money">
+                  MONEY MOVED: {moneyMoved ? "YES" : "NO"}
+                </span>
+              </div>
+              <div className="send-verdict-grid">
+                <div className="send-verdict-item">
+                  <div className="send-verdict-key">Risk Score</div>
+                  <div className="send-verdict-val mono">{result.risk_score != null ? formatPct(result.risk_score) : "\u2014"}</div>
+                </div>
+                <div className="send-verdict-item">
+                  <div className="send-verdict-key">Risk Level</div>
+                  <div className="send-verdict-val mono">{result.risk_level || "\u2014"}</div>
+                </div>
+                <div className="send-verdict-item">
+                  <div className="send-verdict-key">Amount</div>
+                  <div className="send-verdict-val mono">{formatINR(result.amount)}</div>
+                </div>
+                <div className="send-verdict-item">
+                  <div className="send-verdict-key">Transfer</div>
+                  <div className="send-verdict-val mono">{result.from_account} {"\u2192"} {result.to_account}</div>
+                </div>
+                <div className="send-verdict-item" style={{ gridColumn: "1 / -1" }}>
+                  <div className="send-verdict-key">Event ID</div>
+                  <div className="send-verdict-val mono dim" style={{ fontSize: 10.5 }}>{result.event_id}</div>
+                </div>
+              </div>
+            </div>
+            <div className="send-next" onClick={() => onNavigate("Transactions")}>
+              View it in Live Transactions {"\u2192"}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1074,7 +1314,7 @@ function SystemHealthPage({ lag, connected, stats, onSeed, seeding, config }) {
           <p style={{ fontSize: 12, color: "var(--slate)", marginBottom: 12 }}>
             Generate demo transactions and push them through the live Kafka / PostgreSQL pipeline. Accounts and amounts are drawn from the database. The ML model scores each transaction and the risk policy determines the outcome.
           </p>
-          <button className="btn btn-approve" onClick={onSeed} disabled={seeding || !connected}>
+          <button className="btn btn-approve" onClick={() => onSeed()} disabled={seeding || !connected}>
             {seeding ? "Generating Events..." : "\u26A1 Generate Demo Transactions"}
           </button>
         </div>
@@ -1245,10 +1485,16 @@ export default function App() {
   const [selectedTxnId, setSelectedTxnId] = useState(null);
   const [actionPending, setActionPending] = useState(false);
   const [seeding, setSeeding] = useState(false);
+  const [demo, setDemo] = useState({ status: "idle", lastTxn: null, error: null });
+  const [send, setSend] = useState({ status: "idle", result: null, error: null });
+  const [justSent, setJustSent] = useState([]);
   const [toasts, setToasts] = useState([]);
   const [timeRange, setTimeRange] = useState("24H");
+  const timeRangeRef = useRef("24H");
+  const [refreshing, setRefreshing] = useState(false);
 
   const toastId = useRef(0);
+  const txnsRef = useRef([]);
 
   function addToast(type, msg) {
     const id = ++toastId.current;
@@ -1260,33 +1506,115 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }
 
-  async function handleSeedDemoData() {
+  async function handleSeedDemoData(count) {
+    const knownIds = new Set((txnsRef.current || []).map((t) => t.event_id));
     setSeeding(true);
+    setDemo({ status: "processing", lastTxn: null, error: null });
     try {
-      const res = await fetch("/api/admin/seed-demo", { method: "POST" });
+      const res = await fetch("/api/admin/seed-demo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(count ? { count } : {}),
+      });
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      addToast("success", `Seeded ${data.count} demo transactions via Kafka pipeline.`);
+
+      // Poll the existing transaction API until the new demo event has been
+      // scored by the ML model, decided by the policy, and persisted to
+      // PostgreSQL. Only the ACTUAL persisted outcome is shown — nothing is
+      // fabricated in the frontend.
+      const deadline = Date.now() + 45000;
+      let found = null;
+      while (Date.now() < deadline) {
+        const t = await fetchTransactions(200);
+        found = (t.transactions || []).find(
+          (tx) =>
+            tx.event_id &&
+            tx.event_id.startsWith("demo-") &&
+            !knownIds.has(tx.event_id) &&
+            (tx.status === "applied" || tx.status === "held" || tx.status === "blocked")
+        );
+        if (found) break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+
       await refreshData();
+
+      if (found) {
+        setDemo({
+          status: "done",
+          lastTxn: {
+            event_id: found.event_id,
+            amount: found.amount,
+            risk_score: found.risk_score,
+            risk_level: found.risk_level,
+            decision: found.status,
+            created_at: found.created_at,
+          },
+          error: null,
+        });
+        addToast("success", "Test transaction processed through the live pipeline.");
+      } else {
+        throw new Error("Event published but not yet persisted; check that the ledger consumer is running");
+      }
     } catch (e) {
+      setDemo((prev) => ({ ...prev, status: "error", error: e.message }));
       addToast("error", `Seeding failed: ${e.message}`);
     } finally {
       setSeeding(false);
     }
   }
 
-  const refreshData = useCallback(async () => {
+  async function handleSendTransaction(payload) {
+    setSend({ status: "processing", result: null, error: null });
     try {
+      const { event_id } = await sendTransaction(payload);
+
+      // Poll the existing transaction API until the manual event has been
+      // scored by the ML model, decided by the policy, and persisted to
+      // PostgreSQL. Only the ACTUAL persisted outcome is shown — nothing is
+      // fabricated in the frontend.
+      const deadline = Date.now() + 45000;
+      let found = null;
+      while (Date.now() < deadline) {
+        const t = await fetchTransactions(200);
+        found = (t.transactions || []).find((tx) => tx.event_id === event_id);
+        if (found) break;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      await refreshData();
+
+      if (found) {
+        setSend({ status: "done", result: found, error: null });
+        setJustSent((prev) => (prev.includes(found.event_id) ? prev : [...prev, found.event_id]));
+        window.setTimeout(() => {
+          setJustSent((prev) => prev.filter((id) => id !== found.event_id));
+        }, 12000);
+        addToast("success", `Transaction ${found.event_id} processed: ${found.status.toUpperCase()}`);
+      } else {
+        throw new Error("Event published but not yet persisted; check that the ledger consumer is running");
+      }
+    } catch (e) {
+      setSend((prev) => ({ ...prev, status: "error", error: e.message }));
+      addToast("error", `Send failed: ${e.message}`);
+    }
+  }
+
+  const refreshData = useCallback(async (rangeOverride) => {
+    try {
+      const range = rangeOverride || timeRangeRef.current;
       const [b, t, a, l, s, c] = await Promise.all([
         fetchBalances(),
-        fetchTransactions(200),
+        fetchTransactions(200, range),
         fetchAlerts(),
         fetchLag(),
-        fetchStats(),
+        fetchStats(range),
         fetchConfig(),
       ]);
       setBalances(b.accounts);
       setTxns(t.transactions);
+      txnsRef.current = t.transactions;
       setAlerts(a.alerts);
       setLag(l.lag);
       setStats(s);
@@ -1304,6 +1632,22 @@ export default function App() {
     const id = setInterval(refreshData, POLL_MS);
     return () => clearInterval(id);
   }, [refreshData]);
+
+  function handleTimeRange(r) {
+    setTimeRange(r);
+    timeRangeRef.current = r;
+    refreshData(r);
+  }
+
+  async function handleRefresh() {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await refreshData();
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function handleAction(eventId, actionType) {
     setActionPending(true);
@@ -1357,10 +1701,15 @@ export default function App() {
           stats={stats} txns={txns} alerts={alerts} config={config}
           lag={lag} balances={balances}
           onSelectTxn={(id) => setSelectedTxnId(id)}
-          onRefresh={() => refreshData()}
-          timeRange={timeRange} onTimeRange={setTimeRange}
+          onRefresh={handleRefresh}
+          refreshing={refreshing}
+          timeRange={timeRange} onTimeRange={handleTimeRange}
           connected={connected}
           onNav={goTo}
+          onSeed={() => handleSeedDemoData(1)}
+          seeding={seeding}
+          demo={demo}
+          recentlySent={justSent}
         />
       ) : (
         <div className="workspace">
@@ -1374,7 +1723,10 @@ export default function App() {
           <div className="workspace-body">
             <div className="container">
               {page === "Transactions" && (
-                <LiveTransactionsPage txns={txns} alerts={alerts} config={config} onSelectTxn={(id) => setSelectedTxnId(id)} selectedTxnId={selectedTxnId} />
+                <LiveTransactionsPage txns={txns} alerts={alerts} config={config} onSelectTxn={(id) => setSelectedTxnId(id)} selectedTxnId={selectedTxnId} recentlySent={justSent} />
+              )}
+              {page === "Send Transaction" && (
+                <SendTransactionPage balances={balances} config={config} connected={connected} onSend={handleSendTransaction} send={send} onNavigate={goTo} />
               )}
               {page === "Risk Intelligence" && (
                 <ReviewQueuePage txns={txns} alerts={alerts} config={config} onAction={handleAction} actionPending={actionPending} onSelectTxn={(id) => setSelectedTxnId(id)} />

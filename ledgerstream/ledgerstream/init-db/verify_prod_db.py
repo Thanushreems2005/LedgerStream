@@ -7,7 +7,8 @@ def main():
     with conn.cursor() as cur:
         cur.execute("SELECT SUM(balance) FROM accounts;")
         row = cur.fetchone()
-        print(f"Total balance in production accounts: {row[0]}")
+        total = row[0] if row is not None else None
+        print(f"Total balance in production accounts: {total}")
     conn.close()
 
 if __name__ == "__main__":

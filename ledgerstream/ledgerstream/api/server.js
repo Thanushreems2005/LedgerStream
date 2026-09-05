@@ -94,22 +94,40 @@ app.get("/api/transactions", async (req, res) => {
     Number(req.query.limit) || 50,
     MAX_LIMIT
   );
+  const since = rangeSince(req);
   try {
-    const { rows } = await pool.query(
-      `SELECT event_id, from_account, to_account, amount, status, error_reason,
-              risk_score, risk_level, reasons,
-              CASE
-                WHEN amount < $2 THEN '${AMOUNT_BANDS[0].label}'
-                WHEN amount <= $3 THEN '${AMOUNT_BANDS[1].label}'
-                WHEN amount <= $4 THEN '${AMOUNT_BANDS[2].label}'
-                ELSE '${AMOUNT_BANDS[3].label}'
-              END AS amount_band,
-              created_at AT TIME ZONE 'UTC' AS created_at
-       FROM transactions_log
-       ORDER BY created_at DESC
-       LIMIT $1`,
-      [limit, AMOUNT_BANDS[0].max, AMOUNT_BANDS[1].max, AMOUNT_BANDS[2].max]
-    );
+    const { rows } = since
+      ? await pool.query(
+          `SELECT event_id, from_account, to_account, amount, status, error_reason,
+                  risk_score, risk_level, reasons,
+                  CASE
+                    WHEN amount < $3 THEN '${AMOUNT_BANDS[0].label}'
+                    WHEN amount <= $4 THEN '${AMOUNT_BANDS[1].label}'
+                    WHEN amount <= $5 THEN '${AMOUNT_BANDS[2].label}'
+                    ELSE '${AMOUNT_BANDS[3].label}'
+                  END AS amount_band,
+                  created_at AT TIME ZONE 'UTC' AS created_at
+           FROM transactions_log
+           WHERE created_at >= now() - $2::interval
+           ORDER BY created_at DESC
+           LIMIT $1`,
+          [limit, since, AMOUNT_BANDS[0].max, AMOUNT_BANDS[1].max, AMOUNT_BANDS[2].max]
+        )
+      : await pool.query(
+          `SELECT event_id, from_account, to_account, amount, status, error_reason,
+                  risk_score, risk_level, reasons,
+                  CASE
+                    WHEN amount < $2 THEN '${AMOUNT_BANDS[0].label}'
+                    WHEN amount <= $3 THEN '${AMOUNT_BANDS[1].label}'
+                    WHEN amount <= $4 THEN '${AMOUNT_BANDS[2].label}'
+                    ELSE '${AMOUNT_BANDS[3].label}'
+                  END AS amount_band,
+                  created_at AT TIME ZONE 'UTC' AS created_at
+           FROM transactions_log
+           ORDER BY created_at DESC
+           LIMIT $1`,
+          [limit, AMOUNT_BANDS[0].max, AMOUNT_BANDS[1].max, AMOUNT_BANDS[2].max]
+        );
     res.json({ ok: true, transactions: rows });
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e.message || e) });
@@ -134,6 +152,25 @@ const AMOUNT_BANDS = [
   { label: "HIGH",     max: Infinity },
 ];
 
+// Dashboard time-range windows for the optional `range` query parameter.
+// When provided, /api/stats and /api/transactions scope results to rows whose
+// created_at falls within the window; when omitted they keep returning the
+// cumulative (all-time) data, preserving the existing API contract.
+// Cutoffs are expressed as intervals relative to now() inside PostgreSQL so
+// the comparison stays consistent with how created_at is stored and read.
+const RANGE_INTERVAL = {
+  "1H": "1 hour",
+  "6H": "6 hours",
+  "24H": "24 hours",
+  "7D": "7 days",
+  "30D": "30 days",
+};
+
+function rangeSince(req) {
+  const key = String(req.query.range || "").toUpperCase();
+  return RANGE_INTERVAL[key] || null;
+}
+
 app.get("/api/config", (_req, res) => {
   res.json({
     ok: true,
@@ -151,29 +188,35 @@ app.get("/api/config", (_req, res) => {
   });
 });
 
-app.get("/api/stats", async (_req, res) => {
+app.get("/api/stats", async (req, res) => {
+  const since = rangeSince(req);
+  const rangeClause = since ? "WHERE created_at >= now() - $1::interval" : "";
+  const params = since ? [since] : [];
   try {
     const { rows } = await pool.query(
-      "SELECT COUNT(*) AS count FROM transactions_log"
+      `SELECT COUNT(*) AS count FROM transactions_log ${rangeClause}`,
+      params
     );
-    const countsRes = await pool.query(
-      "SELECT status, COUNT(*) AS count FROM transactions_log GROUP BY status"
+    const aggRes = await pool.query(
+      `SELECT status, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS value
+         FROM transactions_log ${rangeClause}
+        GROUP BY status`,
+      params
     );
     const counts = { applied: 0, held: 0, blocked: 0, declined: 0 };
-    countsRes.rows.forEach(r => {
+    const values = { applied: 0, held: 0, blocked: 0, declined: 0 };
+    aggRes.rows.forEach(r => {
       if (r.status in counts) {
         counts[r.status] = Number(r.count);
+        values[r.status] = Number(r.value);
       }
     });
 
     // Backend-derived aggregate from PostgreSQL (single source of truth).
     // The frontend uses these to display blocked count and blocked value so
     // the figures are never limited by the transactions-list page size.
-    const blockedValueRes = await pool.query(
-      "SELECT COALESCE(SUM(amount), 0) AS value, COUNT(*) AS count FROM transactions_log WHERE status = 'blocked'"
-    );
-    const blockedValue = Number(blockedValueRes.rows[0].value);
-    const blockedDbCount = Number(blockedValueRes.rows[0].count);
+    const blockedValue = values.blocked;
+    const blockedDbCount = counts.blocked;
 
     const levels = getLevelCounts();
     res.json({
@@ -184,7 +227,10 @@ app.get("/api/stats", async (_req, res) => {
       appliedCount: counts.applied,
       heldCount: counts.held,
       blockedCount: counts.blocked,
+      appliedValue: values.applied,
+      heldValue: values.held,
       blockedValue,
+      declinedValue: values.declined,
       blockedDbCount,
       declinedCount: counts.declined,
       threshold: RISK_HIGH_THRESHOLD,
@@ -444,6 +490,87 @@ app.post("/api/admin/seed-demo", async (req, res) => {
         console.error("[api] Error disconnecting seed producer:", e);
       }
     }
+  }
+});
+
+// --- Manual transaction send (operator-driven) -------------------------
+// Validates the transfer against the LIVE ledger, then pushes a manual-*
+// event through the same Kafka -> ML scoring -> policy -> PostgreSQL path
+// used by every other transaction. The consumer remains the enforcement
+// point for settlement; the check here is an authoritative pre-flight so
+// the operator gets a real backend error before anything is published.
+app.post("/api/admin/send-transaction", async (req, res) => {
+  const { from_account, to_account, amount } = req.body || {};
+  try {
+    if (typeof from_account !== "string" || !from_account) {
+      return res.status(400).json({ ok: false, error: "from_account is required" });
+    }
+    if (typeof to_account !== "string" || !to_account) {
+      return res.status(400).json({ ok: false, error: "to_account is required" });
+    }
+    if (from_account === to_account) {
+      return res.status(400).json({ ok: false, error: "Sender and receiver must be different accounts" });
+    }
+    if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+      return res.status(400).json({ ok: false, error: "amount must be a positive number" });
+    }
+    const value = Math.round(Number(amount) * 100) / 100;
+    if (value < 0.01) {
+      return res.status(400).json({ ok: false, error: "amount must be at least 0.01" });
+    }
+
+    // Authoritative balance pre-flight against PostgreSQL. The consumer
+    // re-checks under a row lock at settle time, so a concurrent transfer
+    // can never drain an account even if this snapshot is momentarily stale.
+    const { rows } = await pool.query(
+      "SELECT account_id, balance FROM accounts WHERE account_id = ANY($1)",
+      [[from_account, to_account]]
+    );
+    const byId = {};
+    for (const r of rows) byId[r.account_id] = Number(r.balance);
+    const missing = [from_account, to_account].filter((id) => !(id in byId));
+    if (missing.length > 0) {
+      return res.status(400).json({ ok: false, error: `Unknown account: ${missing[0]}` });
+    }
+    if (byId[from_account] < value) {
+      return res.status(400).json({
+        ok: false,
+        error: `insufficient_balance: ${from_account} has ${byId[from_account]} but transfer requires ${value}`,
+      });
+    }
+
+    const event_id = `manual-${crypto.randomUUID()}`;
+    const event = {
+      event_id,
+      from_account,
+      to_account,
+      amount: value,
+      timestamp: new Date().toISOString().replace(/Z$/, "+00:00"),
+    };
+
+    let producer;
+    try {
+      producer = kafka.producer();
+      await producer.connect();
+      await producer.send({
+        topic: process.env.KAFKA_TRANSACTIONS_TOPIC || "transactions",
+        messages: [{ key: from_account, value: JSON.stringify(event) }],
+      });
+    } finally {
+      if (producer) {
+        try {
+          await producer.disconnect();
+        } catch (e) {
+          console.error("[api] Error disconnecting send producer:", e);
+        }
+      }
+    }
+
+    logStructuredEvent("manual_send", event_id, value, from_account, to_account);
+    res.json({ ok: true, event_id, from_account, to_account, amount: value });
+  } catch (e) {
+    console.error("[api] send-transaction error:", e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
 
