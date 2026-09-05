@@ -14,8 +14,9 @@ const NAV = [
   { key: "Overview", label: "Overview" },
   { key: "Transactions", label: "Transactions" },
   { key: "Risk Intelligence", label: "Risk Intelligence" },
-  { key: "Alerts", label: "Alerts" },
   { key: "Analytics", label: "Analytics" },
+  { key: "Alerts", label: "Alerts" },
+  { key: "Accounts", label: "Accounts" },
 ];
 
 const PAGES = ["Accounts", "System Health"];
@@ -77,7 +78,7 @@ function levelBadge(level) {
 
 function statusBadge(status) {
   switch (status) {
-    case "applied":  return <span className="badge badge-green">APPROVED</span>;
+    case "applied":  return <span className="badge badge-green">APPLIED</span>;
     case "held":     return <span className="badge badge-amber">HELD</span>;
     case "blocked":  return <span className="badge badge-red">BLOCKED</span>;
     case "declined": return <span className="badge badge-dim">DECLINED</span>;
@@ -169,17 +170,17 @@ function TopNav({ page, onNav, heldCount, blockedCount, connected }) {
         <nav className="topnav">
           <div className="brand">
             <div className="brand-mark">LS</div>
-            Ledger<em>Stream</em> RM
+            Ledger<span>Stream</span>
           </div>
           <div className="topnav-center">
             {NAV.map((n) => navBtn(n))}
           </div>
           <div className="topnav-right">
             <span className={`nav-status ${connected ? "live" : "offline"}`}>
-              <span className="nav-status-dot" />
               {connected ? "System Healthy" : "Offline"}
             </span>
-            <button className="nav-burger" onClick={() => setMenuOpen((v) => !v)}>{"\u2630"}</button>
+            <div className="nav-avatar">RM</div>
+            <button className="nav-burger" onClick={() => setMenuOpen((v) => !v)}>☰</button>
           </div>
         </nav>
       </div>
@@ -190,7 +191,8 @@ function TopNav({ page, onNav, heldCount, blockedCount, connected }) {
   );
 }
 
-function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn, onRefresh, timeRange, onTimeRange, connected }) {
+function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn, onRefresh, timeRange, onTimeRange, connected, onNav }) {
+  const dashboardRef = useRef(null);
   const rangeTxns = txns.filter((t) => inRange(t.created_at, timeRange));
   const applied  = Number(stats?.appliedCount  ?? 0);
   const held     = Number(stats?.heldCount     ?? 0);
@@ -199,19 +201,14 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
   const analyzed = Number(stats?.analyzed ?? 0);
 
   const blockedValue = Number(stats?.blockedValue ?? 0);
-  const totalBalance = balances.reduce((s, a) => s + Number(a.balance), 0);
+  const approvalRate = analyzed > 0 ? applied / analyzed : 0;
 
   let liveScore = null;
   let liveLevel = "LOW";
-  if (alerts.length > 0) {
-    const recent = alerts[0];
-    if (recent?.risk_score != null) {
-      liveScore = Number(recent.risk_score);
-      const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
-      const highT = config?.riskPolicy?.highThreshold ?? 0.10;
-      if (liveScore >= highT) liveLevel = "HIGH";
-      else if (liveScore >= lowT) liveLevel = "MEDIUM";
-    }
+  const latest = txns[0] || alerts[0] || null;
+  if (latest?.risk_score != null) {
+    liveScore = Number(latest.risk_score);
+    liveLevel = latest.risk_level || (latest.status === "blocked" ? "HIGH" : latest.status === "held" ? "MEDIUM" : "LOW");
   }
 
   const lowCount = applied;
@@ -223,8 +220,8 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
 
   const donutStops = [
     { color: "#10B981", from: 0, to: lowPct * 100 },
-    { color: "#D97706", from: lowPct * 100, to: (lowPct + medPct) * 100 },
-    { color: "#EF4444", from: (lowPct + medPct) * 100, to: 100 },
+    { color: "#C78A1F", from: lowPct * 100, to: (lowPct + medPct) * 100 },
+    { color: "#D64545", from: (lowPct + medPct) * 100, to: 100 },
   ].filter((s) => s.to - s.from > 0.01);
   const gradStr = donutStops
     .map((s, i) => `${s.color} ${i === 0 ? 0 : s.from}% ${i === donutStops.length - 1 ? 100 : s.to}%`)
@@ -235,117 +232,143 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
   const fraudLag  = Number(lag?.fraud?.lag  ?? 0);
   const maxLag = Math.max(ledgerLag, fraudLag);
 
-  const lowT = config?.riskPolicy?.lowThreshold ?? 0.01;
-  const highT = config?.riskPolicy?.highThreshold ?? 0.10;
-
-  const pipelineScore = liveScore !== null ? formatPct(liveScore) : "\u2014";
-  const pipelineDecision = liveLevel === "HIGH" ? "BLOCK" : liveLevel === "MEDIUM" ? "VERIFY" : "APPROVE";
-  const pipelineEnforce = liveLevel === "HIGH" ? "BLOCKED" : liveLevel === "MEDIUM" ? "HELD" : "SETTLED";
-
   return (
     <>
-      <section className="header-section">
-        <div className="header-inner">
-          <div className="header-eyebrow">
-            <span className="nav-status-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--emerald)", boxShadow: "0 0 6px rgba(16,185,129,.8)" }} />
-            AI Risk Manager
-          </div>
-          <h1 className="header-title">Real-time transaction risk detection and automated enforcement.</h1>
-          <p className="header-sub">
-            Every transaction is scored by the ML risk engine before settlement. High-risk payments are blocked automatically.
-          </p>
-        </div>
-      </section>
+      <section className="hero">
+        <div className="hero-grid" />
+        <div className="hero-viz">
+          <svg viewBox="0 0 1400 800" preserveAspectRatio="xMidYMid slice">
+            {/* Edges / Animated Dashed Constellation Lines */}
+            <line x1="940" y1="195" x2="1280" y2="245" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="940" y1="195" x2="1140" y2="360" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="940" y1="195" x2="800" y2="340" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="1280" y1="245" x2="1140" y2="360" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="800" y1="340" x2="1140" y2="360" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="800" y1="340" x2="830" y2="490" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="1140" y1="360" x2="1080" y2="550" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="830" y1="490" x2="1080" y2="550" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="1080" y1="550" x2="1230" y2="640" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="830" y1="490" x2="680" y2="660" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="1080" y1="550" x2="680" y2="660" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="680" y1="660" x2="220" y2="580" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
+            <line x1="220" y1="580" x2="800" y2="340" stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.2" className="viz-edge" />
 
-      <section className="pipeline">
-        <div className="pipeline-flow">
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">01</div>
-            <div className="pipeline-stage-title">Transaction</div>
-            <div className="pipeline-stage-desc">Payment event received via Kafka</div>
-          </div>
-          <div className="pipeline-arrow">{"\u2192"}</div>
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">02</div>
-            <div className="pipeline-stage-title">Risk Engine</div>
-            <div className="pipeline-stage-desc">ML model computes fraud probability</div>
-          </div>
-          <div className="pipeline-arrow">{"\u2192"}</div>
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">03</div>
-            <div className="pipeline-stage-title">Risk Score</div>
-            <div className="pipeline-stage-value">{pipelineScore}</div>
-            <div className="pipeline-stage-desc">Latest: {liveLevel} risk</div>
-          </div>
-          <div className="pipeline-arrow">{"\u2192"}</div>
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">04</div>
-            <div className="pipeline-stage-title">Decision</div>
-            <div className="pipeline-stage-value">{pipelineDecision}</div>
-            <div className="pipeline-stage-desc">Thresholds: {formatPct(lowT)} / {formatPct(highT)}</div>
-          </div>
-          <div className="pipeline-arrow">{"\u2192"}</div>
-          <div className="pipeline-stage">
-            <div className="pipeline-stage-num">05</div>
-            <div className="pipeline-stage-title">Enforcement</div>
-            <div className="pipeline-stage-value">{pipelineEnforce}</div>
-            <div className="pipeline-stage-desc">Automated ledger action</div>
-          </div>
-        </div>
-      </section>
+            {/* Constellation Nodes & Glowing Target Rings */}
+            <circle cx="940" cy="195" r="14" fill="none" stroke="rgba(16, 185, 129, 0.4)" strokeWidth="1.5" />
+            <circle cx="940" cy="195" r="4" fill="#10b981" className="viz-node" />
 
-      <div className="content">
-        <div className="content-head">
-          <div>
-            <div className="content-head-title">Live Risk Overview</div>
-            <div className="content-head-sub">Real-time system health and risk metrics</div>
+            <circle cx="1280" cy="245" r="4" fill="#10b981" className="viz-node" />
+
+            <circle cx="1140" cy="360" r="16" fill="none" stroke="rgba(16, 185, 129, 0.3)" strokeWidth="1.2" />
+            <circle cx="1140" cy="360" r="6" fill="#10b981" className="viz-node" />
+
+            <circle cx="800" cy="340" r="4" fill="#10b981" className="viz-node" />
+            <circle cx="830" cy="490" r="4" fill="#10b981" className="viz-node" />
+
+            <circle cx="1080" cy="550" r="5" fill="#10b981" className="viz-node" />
+            <circle cx="1230" cy="640" r="4" fill="#10b981" className="viz-node" />
+
+            <circle cx="680" cy="660" r="4" fill="#10b981" className="viz-node" />
+            <circle cx="220" cy="580" r="4" fill="#10b981" className="viz-node" />
+          </svg>
+        </div>
+        <div className="hero-inner">
+          <div className="hero-eyebrow">
+            <span className="pulse" /> AI-POWERED RISK INTELLIGENCE
           </div>
-          <div className="content-head-right">
-            {["1H", "6H", "24H", "7D", "30D"].map((r) => (
-              <button key={r} className={`time-chip${timeRange === r ? " active" : ""}`} onClick={() => onTimeRange(r)}>{r}</button>
-            ))}
-            <button className="refresh-btn" onClick={onRefresh} title="Refresh">{"\u27F3"} Refresh</button>
+          <h1>See risk before it becomes <span className="em">loss.</span></h1>
+          <p className="hero-sub">Real-time payment monitoring, AI fraud detection, and intelligent risk decisions — all in one platform.</p>
+          <div className="hero-cta">
+            <button className="btn-hero-primary" onClick={() => dashboardRef.current && dashboardRef.current.scrollIntoView({ behavior: "smooth" })}>
+              Explore Dashboard →
+            </button>
+            <button className="btn-hero-secondary" onClick={() => onNav("Transactions")}>
+              View Live Transactions
+            </button>
           </div>
         </div>
-
-        <div className="kpi-row">
-          <div className="kpi-card">
-            <div className="kpi-accent green" />
-            <div className="kpi-label">Current Ledger Balance</div>
-            <div className="kpi-value sm emerald">{formatINR(totalBalance)}</div>
-            <div className="kpi-sub">{balances.length} accounts {"\u00B7"} conserved</div>
-          </div>
-          <div className="kpi-card">
-            <div className="kpi-accent green" />
-            <div className="kpi-label">Transactions Processed</div>
-            <div className="kpi-value">{analyzed.toLocaleString()}</div>
-            <div className="kpi-sub">AI-scored via risk engine</div>
-          </div>
-          <div className="kpi-card">
-            <div className="kpi-accent red" />
-            <div className="kpi-label">Blocked Transactions</div>
-            <div className="kpi-value red">{blocked.toLocaleString()}</div>
-            <div className="kpi-sub">stopped before settlement</div>
-          </div>
-          <div className="kpi-card">
-            <div className="kpi-accent red" />
-            <div className="kpi-label">Blocked Transaction Value</div>
-            <div className="kpi-value sm red">{formatINR(blockedValue)}</div>
-            <div className="kpi-sub">cumulative value blocked</div>
-          </div>
-        </div>
-
-        <div className="grid-2">
-          <div className="card">
-            <div className="card-header">
-              <span className="card-title"><span className="dot-indicator dot-green" /> Risk Distribution</span>
-              <span className="card-meta">by transaction count</span>
+        <div className="hero-metrics">
+          <div className="hero-metric">
+            <div className="hero-metric-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" transform="rotate(45 12 12)" /><rect x="8" y="8" width="8" height="8" rx="1" transform="rotate(45 12 12)" /></svg>
             </div>
-            <div className="card-body">
+            <div>
+              <h4>AI Risk Detection</h4>
+              <p>Microsecond latency scoring</p>
+            </div>
+          </div>
+          <div className="hero-metric">
+            <div className="hero-metric-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+            </div>
+            <div>
+              <h4>Real-time Processing</h4>
+              <p>Continuous stream analysis</p>
+            </div>
+          </div>
+          <div className="hero-metric">
+            <div className="hero-metric-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
+            </div>
+            <div>
+              <h4>Zero Data Loss</h4>
+              <p>Kafka event durability</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div className="dashboard" ref={dashboardRef}>
+        <div className="container">
+          <div className="sec-head">
+            <div>
+              <h2 className="sec-head-title">Live Risk Overview</h2>
+              <p className="sec-head-sub">Real-time system health and risk metrics</p>
+            </div>
+            <div className="sec-head-right">
+              {["1H", "6H", "24H", "7D", "30D"].map((r) => (
+                <button key={r} className={`time-chip${timeRange === r ? " active" : ""}`} onClick={() => onTimeRange(r)}>{r}</button>
+              ))}
+              <button className="refresh-chip" onClick={onRefresh} title="Refresh">↻ Refresh</button>
+            </div>
+          </div>
+
+          <div className="kpi-row">
+            <div className="kpi-card green">
+              <div className="kpi-accent-top green" />
+              <div className="kpi-label">Total Processed</div>
+              <div className="kpi-value">{analyzed.toLocaleString()}</div>
+              <div className="kpi-sub">Transactions scored by the AI risk engine</div>
+            </div>
+            <div className="kpi-card">
+              <div className={`kpi-accent-top ${riskFillClass(liveLevel)}`} />
+              <div className="kpi-label"><span className="pulse" /> Risk Score (Live)</div>
+              <div className="kpi-value">{liveScore !== null ? liveScore.toFixed(4) : "—"} <span className="unit">probability</span></div>
+              <div className={`risk-badge-live ${riskFillClass(liveLevel)}`}>{liveLevel} RISK</div>
+              <div className="mini-progress"><div style={{ width: `${Math.min(100, (liveScore || 0) * 100)}%` }} /></div>
+            </div>
+            <div className="kpi-card green">
+              <div className="kpi-accent-top green" />
+              <div className="kpi-label">Approval Rate</div>
+              <div className="kpi-value emerald">{formatPct(approvalRate)}</div>
+              <div className="kpi-sub">{applied.toLocaleString()} approved transactions</div>
+            </div>
+            <div className="kpi-card red">
+              <div className="kpi-accent-top red" />
+              <div className="kpi-label">Blocked Fraud Value</div>
+              <div className="kpi-value red sm">{formatINR(blockedValue)}</div>
+              <div className="kpi-sub">{blocked.toLocaleString()} high-risk transactions stopped</div>
+            </div>
+          </div>
+
+          <div className="analytics-grid">
+            <div className="a-card">
+              <div className="a-card-title">Risk Distribution</div>
+              <div className="a-card-meta">by transaction count</div>
               <div className="donut-wrap">
                 <div className="donut">
-                  <svg viewBox="0 0 160 160" width="140" height="140">
-                    <circle cx="80" cy="80" r="60" fill="none" stroke="var(--cream-2)" strokeWidth="12" />
+                  <svg viewBox="0 0 160 160" width="158" height="158">
+                    <circle cx="80" cy="80" r="60" fill="none" stroke="var(--cream-3)" strokeWidth="12" />
                     <circle
                       cx="80" cy="80" r="60"
                       fill="none" stroke={gradStr}
@@ -363,8 +386,8 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
                 <div className="donut-legend">
                   {[
                     { label: "Low Risk", value: lowCount, color: "#10B981" },
-                    { label: "Medium Risk", value: medCount, color: "#D97706" },
-                    { label: "High Risk", value: highCount, color: "#EF4444" },
+                    { label: "Medium Risk", value: medCount, color: "#C78A1F" },
+                    { label: "High Risk", value: highCount, color: "#D64545" },
                   ].filter((i) => i.value > 0).map((i) => (
                     <div key={i.label} className="legend-row">
                       <span className="legend-dot" style={{ background: i.color }} />
@@ -375,28 +398,24 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
                 </div>
               </div>
             </div>
-          </div>
 
-          <div className="card">
-            <div className="card-header">
-              <span className="card-title"><span className="dot-indicator dot-green" /> Recent Transactions</span>
-              <span className="card-meta">live stream {"\u00B7"} click to inspect</span>
-            </div>
-            <div className="card-body" style={{ padding: "8px 12px" }}>
+            <div className="a-card">
+              <div className="a-card-title">Recent Transactions</div>
+              <div className="a-card-meta">live stream · click to inspect</div>
               <div className="txn-stream">
                 {stream.length === 0 && <div className="empty-state">No transactions yet</div>}
                 {stream.map((t) => {
                   const level = t.risk_level || "LOW";
                   const score = t.risk_score != null ? Number(t.risk_score) : null;
-                  const icon = level === "HIGH" ? "\u2297" : level === "MEDIUM" ? "\u23F8" : "\u2713";
+                  const icon = level === "HIGH" ? "⊗" : level === "MEDIUM" ? "⏸" : "✓";
                   return (
                     <div key={t.event_id} className="txn-item" onClick={() => onSelectTxn(t.event_id)}>
                       <div className={`txn-icon ${level.toLowerCase()}`}>{icon}</div>
                       <div className="txn-main">
-                        <div className="txn-id">{t.event_id.length > 16 ? t.event_id.slice(0, 16) + "\u2026" : t.event_id}</div>
-                        <div className="txn-meta">{timeAgo(t.created_at)} {"\u00B7"} {t.from_account} {"\u2192"} {t.to_account}</div>
+                        <div className="txn-id">{t.event_id.length > 16 ? t.event_id.slice(0, 16) + "…" : t.event_id}</div>
+                        <div className="txn-meta">{timeAgo(t.created_at)} · {t.from_account} → {t.to_account}</div>
                       </div>
-                      <div style={{ textAlign: "right" }}>
+                      <div>
                         <div className="txn-amount">{formatINR(t.amount)}</div>
                         <div className="txn-score">{score !== null ? `risk ${formatPct(score)}` : level}</div>
                       </div>
@@ -405,33 +424,80 @@ function OverviewPage({ stats, txns, alerts, config, lag, balances, onSelectTxn,
                 })}
               </div>
             </div>
-          </div>
-        </div>
 
-        <div className="health-bar">
-          <span className="health-bar-label">System Health</span>
-          <div className="health-sep" />
-          <div className="health-item">
-            <span className={`health-dot ${connected ? "ok" : "err"}`} />
-            API
-          </div>
-          <div className="health-sep" />
-          <div className="health-item">
-            <span className={`health-dot ${maxLag === 0 ? "ok" : maxLag < 100 ? "warn" : "err"}`} />
-            Kafka Lag: {maxLag}
-          </div>
-          <div className="health-sep" />
-          <div className="health-item">
-            <span className="health-dot ok" />
-            PostgreSQL
-          </div>
-          <div className="health-sep" />
-          <div className="health-item">
-            <span className="health-dot ok" />
-            ML Engine
+            <div className="a-card">
+              <div className="a-card-title">AI Risk Intelligence</div>
+              <div className="a-card-meta">Real-time signal analysis</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div className="ri-item pulse">
+                  <div className="ri-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                  </div>
+                  <div>
+                    <div className="ri-title">Microsecond Latency <span className="badge badge-green">LIVE</span></div>
+                    <div className="ri-desc">RandomForest model scoring each transfer against 6 engineered risk signals</div>
+                    <div className="ri-time">policy: low &lt; 0.01 · high &gt; 0.10</div>
+                  </div>
+                </div>
+                <div className="ri-item">
+                  <div className="ri-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                  </div>
+                  <div>
+                    <div className="ri-title">Automated Decisioning <span className="badge badge-green">ACTIVE</span></div>
+                    <div className="ri-desc">HIGH risk blocked before ledger settlement; MEDIUM routed to risk review</div>
+                    <div className="ri-time">effectively-once guarantee</div>
+                  </div>
+                </div>
+                <div className="ri-item">
+                  <div className="ri-icon">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
+                  </div>
+                  <div>
+                    <div className="ri-title">Kafka Stream Ingestion <span className="badge badge-green">OK</span></div>
+                    <div className="ri-desc">Continuous payment stream monitoring with zero message loss</div>
+                    <div className="ri-time">{maxLag === 0 ? "0 messages lag" : `${maxLag} msgs lag`}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
+
+      <section className="trust">
+        <div className="container">
+          <div className="trust-eyebrow">WHY LEDGERSTREAM</div>
+          <h2>Risk Intelligence you can <span className="em">trust.</span></h2>
+          <p className="trust-p">Real-time payment monitoring, AI fraud detection, and intelligent risk decisions — all in one platform.</p>
+          <div className="trust-grid">
+            <div className="trust-card">
+              <div className="trust-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" transform="rotate(45 12 12)" /><rect x="8" y="8" width="8" height="8" rx="1" transform="rotate(45 12 12)" /></svg>
+              </div>
+              <h4>AI Risk Engine</h4>
+              <p>Every transaction is scored instantly by the RandomForest V4 engine. Six engineered risk signals feed a calibrated fraud-probability model before money moves.</p>
+              <span className="trust-mono">randomforest-v4 · microsecond latency</span>
+            </div>
+            <div className="trust-card">
+              <div className="trust-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              </div>
+              <h4>Real-time Decisions</h4>
+              <p>Streaming Kafka ingestion keeps scoring continuous. HIGH risk is blocked, MEDIUM is held for review, LOW settles through — automatically.</p>
+              <span className="trust-mono">kafka-stream · deterministic policy</span>
+            </div>
+            <div className="trust-card">
+              <div className="trust-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
+              </div>
+              <h4>Reliable Ledger Processing</h4>
+              <p>Idempotent ledger processing with effectively-once outcomes. Balances stay conserved across restart, retry, and replay.</p>
+              <span className="trust-mono">postgres · ACID transaction guarantee</span>
+            </div>
+          </div>
+        </div>
+      </section>
     </>
   );
 }
@@ -440,11 +506,14 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [levelFilter, setLevelFilter] = useState("all");
+  const [bandFilter, setBandFilter] = useState("all");
 
   const filtered = txns.filter((t) => {
     const level = t.risk_level || "LOW";
+    const band = t.amount_band || amountBandFor(t.amount, config);
     if (statusFilter !== "all" && t.status !== statusFilter) return false;
     if (levelFilter !== "all" && level !== levelFilter) return false;
+    if (bandFilter !== "all" && band !== bandFilter) return false;
     if (search) {
       const q = search.toLowerCase();
       if (!t.event_id.toLowerCase().includes(q) &&
@@ -471,6 +540,13 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
           <option value="MEDIUM">MEDIUM</option>
           <option value="HIGH">HIGH</option>
         </select>
+        <select className="filter-input" value={bandFilter} onChange={(e) => setBandFilter(e.target.value)}>
+          <option value="all">All Amount Bands</option>
+          <option value="VERY LOW">VERY LOW</option>
+          <option value="NORMAL">NORMAL</option>
+          <option value="ELEVATED">ELEVATED</option>
+          <option value="HIGH">HIGH</option>
+        </select>
         <span className="dim" style={{ fontSize: 11, marginLeft: 4, alignSelf: "center" }}>
           {filtered.length} / {txns.length} transactions
         </span>
@@ -483,6 +559,7 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
               <tr>
                 <th>Transaction ID</th>
                 <th>Amount</th>
+                <th>Amount Band</th>
                 <th>Transfer</th>
                 <th>AI Risk</th>
                 <th>Decision</th>
@@ -493,12 +570,14 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
             <tbody>
               {filtered.slice(0, 100).map((t) => {
                 const score = t.risk_score != null ? Number(t.risk_score) : null;
+                const band = t.amount_band || amountBandFor(t.amount, config);
                 return (
                   <tr key={t.event_id} className={`clickable ${t.event_id === selectedTxnId ? "selected" : ""}`} onClick={() => onSelectTxn(t.event_id)}>
-                    <td className="mono dim" style={{ fontSize: 10.5 }}>{t.event_id.length > 14 ? t.event_id.slice(0, 14) + "\u2026" : t.event_id}</td>
+                    <td className="mono dim" style={{ fontSize: 10.5 }}>{t.event_id.length > 14 ? t.event_id.slice(0, 14) + "…" : t.event_id}</td>
                     <td style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{formatINR(t.amount)}</td>
-                    <td className="mono" style={{ fontSize: 11 }}>{t.from_account} {"\u2192"} {t.to_account}</td>
-                    <td style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{score !== null ? formatPct(score) : "\u2014"}</td>
+                    <td>{amountBandBadge(band)}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>{t.from_account} → {t.to_account}</td>
+                    <td style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600 }}>{score !== null ? formatPct(score) : "—"}</td>
                     <td>{statusBadge(t.status)}</td>
                     <td style={{ fontWeight: 600, color: t.status === "applied" ? "var(--green-text)" : "var(--slate)", fontVariantNumeric: "tabular-nums" }}>
                       {t.status === "applied" ? `${formatINR(t.amount)} MOVED` : "₹0.00 MOVED"}
@@ -508,7 +587,7 @@ function LiveTransactionsPage({ txns, alerts, onSelectTxn, selectedTxnId, config
                 );
               })}
               {filtered.length === 0 && (
-                <tr><td colSpan={7}><div className="empty-state">No transactions match your filters</div></td></tr>
+                <tr><td colSpan={8}><div className="empty-state">No transactions match your filters</div></td></tr>
               )}
             </tbody>
           </table>
@@ -557,25 +636,25 @@ function ReviewQueuePage({ txns, alerts, onAction, actionPending, onSelectTxn, c
               <div className="review-card-meta">
                 <div className="review-meta-item">
                   <div className="review-meta-label">Transfer</div>
-                  <div className="review-meta-value">{tx.from_account} {"\u2192"} {tx.to_account}</div>
-                </div>
-                <div className="review-meta-item">
-                  <div className="review-meta-label">AI Risk</div>
-                  <div className="review-meta-value" style={{ color: "var(--amber)", fontWeight: 700 }}>{score != null ? formatPct(score) : "\u2014"}</div>
-                </div>
-                <div className="review-meta-item">
-                  <div className="review-meta-label">Waiting</div>
-                  <div className="review-meta-value">{timeAgo(tx.created_at)}</div>
+                  <div className="review-meta-value">{tx.from_account} → {tx.to_account}</div>
                 </div>
                 <div className="review-meta-item">
                   <div className="review-meta-label">Amount Band</div>
                   <div className="review-meta-value">{amountBandBadge(tx.amount_band || amountBandFor(tx.amount, config))}</div>
                 </div>
+                <div className="review-meta-item">
+                  <div className="review-meta-label">AI Risk</div>
+                  <div className="review-meta-value" style={{ color: "var(--amber)", fontWeight: 700 }}>{score != null ? formatPct(score) : "—"}</div>
+                </div>
+                <div className="review-meta-item">
+                  <div className="review-meta-label">Waiting</div>
+                  <div className="review-meta-value">{timeAgo(tx.created_at)}</div>
+                </div>
               </div>
               {reasons.length > 0 && (
                 <div className="review-signals"><strong>Why flagged:</strong><br />{reasons.join(" \u00B7 ")}</div>
               )}
-              <div className="review-money-frozen">{"\u2717"} MONEY MOVED: NO {"\u2014"} Settlement frozen</div>
+              <div className="review-money-frozen">{"\u2717"} MONEY MOVED: NO {"\u2014"} Settlement held for review</div>
               <div className="review-actions" onClick={(e) => e.stopPropagation()}>
                 <button className="btn btn-approve" style={{ flex: 1 }} disabled={actionPending} onClick={() => onAction(tx.event_id, "approve")}>
                   {actionPending ? "\u2026" : "\u2713 Approve & Settle"}
@@ -638,7 +717,7 @@ function BlockedPage({ txns, alerts, config, stats }) {
           <div className="alerts-section-title">High Risk Transactions</div>
           <div className="alerts-section-sub">Transactions blocked by the risk engine before settlement.</div>
         </div>
-        <div className="alerts-count">{blocked.length} BLOCKED</div>
+        <div className="alerts-count">{blocked.length} RECENT</div>
       </div>
 
       <div className="alerts-grid">
@@ -1098,7 +1177,7 @@ function TransactionDrawer({ txn, alerts, txns, onAction, actionPending, onClose
               <span className="detail-val">{statusBadge(status)}</span>
             </div>
             <div className={`money-moved-box ${moneyMoved ? "yes" : "no"}`} style={{ marginTop: 4 }}>
-              {moneyMoved ? "\u2713" : "\u2717"} MONEY MOVED: {moneyMoved ? "YES \u2014 Settlement complete" : "NO \u2014 Money protected"}
+              {moneyMoved ? "\u2713" : "\u2717"} MONEY MOVED: {moneyMoved ? "YES \u2014 Settlement complete" : status === "held" ? "NO \u2014 Settlement held for review" : "NO \u2014 Settlement blocked"}
             </div>
           </div>
         </div>
@@ -1133,17 +1212,23 @@ function TransactionDrawer({ txn, alerts, txns, onAction, actionPending, onClose
   );
 }
 
-function Footer() {
+function Footer({ onNav }) {
   return (
-    <div className="footer">
-      <div className="footer-inner">
-        <div className="footer-brand">
-          <div className="brand-mark" style={{ width: 22, height: 22, fontSize: 9 }}>LS</div>
-          Ledger<em>Stream</em> RM
+    <footer className="footer">
+      <div className="container">
+        <div className="brand" style={{ fontSize: 13 }}>
+          <div className="brand-mark" style={{ width: 24, height: 24, fontSize: 10 }}>LS</div>
+          Ledger<span>Stream</span> RM
         </div>
-        <div className="footer-copy">Real-time transaction risk management {"\u00B7"} Razorpay Buildathon Track 02</div>
+        <div className="footer-links">
+          <button className="footer-link" onClick={() => onNav && onNav("Accounts")}>Accounts</button>
+          <button className="footer-link" onClick={() => onNav && onNav("System Health")}>System Health</button>
+        </div>
+        <div className="footer-tagline">
+          AI-Powered Real-Time Payment Risk Management
+        </div>
       </div>
-    </div>
+    </footer>
   );
 }
 
@@ -1250,9 +1335,16 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  const goTo = (p) => {
+    setPage(p);
+    scrollTop();
+  };
+
+  const pageTitle = page === "Transactions" ? "Live Transactions" : page;
+
   return (
     <div className="app">
-      <TopNav page={page} onNav={(p) => { setPage(p); scrollTop(); }} heldCount={heldCount} blockedCount={blockedCount} connected={connected} />
+      <TopNav page={page} onNav={goTo} heldCount={heldCount} blockedCount={blockedCount} connected={connected} />
 
       {error && (
         <div className="error-banner">
@@ -1268,38 +1360,43 @@ export default function App() {
           onRefresh={() => refreshData()}
           timeRange={timeRange} onTimeRange={setTimeRange}
           connected={connected}
+          onNav={goTo}
         />
       ) : (
-        <div className="content" style={{ paddingTop: 28 }}>
-          <div className="content-head">
-            <div>
-              <div className="content-head-title">{page}</div>
-              <div className="content-head-sub">{PAGE_SUBS[page]}</div>
+        <div className="workspace">
+          <div className="workspace-hero">
+            <div className="container">
+              <div className="workspace-eyebrow">LEDGERSTREAM · RM PLATFORM</div>
+              <div className="workspace-title">{pageTitle}</div>
+              <div className="workspace-sub">{PAGE_SUBS[page]}</div>
             </div>
           </div>
-
-          {page === "Transactions" && (
-            <LiveTransactionsPage txns={txns} alerts={alerts} config={config} onSelectTxn={(id) => setSelectedTxnId(id)} selectedTxnId={selectedTxnId} />
-          )}
-          {page === "Risk Intelligence" && (
-            <ReviewQueuePage txns={txns} alerts={alerts} config={config} onAction={handleAction} actionPending={actionPending} onSelectTxn={(id) => setSelectedTxnId(id)} />
-          )}
-          {page === "Alerts" && (
-            <BlockedPage txns={txns} alerts={alerts} config={config} stats={stats} />
-          )}
-          {page === "Analytics" && (
-            <AnalyticsPage stats={stats} txns={txns} alerts={alerts} config={config} />
-          )}
-          {page === "Accounts" && (
-            <AccountsPage balances={balances} />
-          )}
-          {page === "System Health" && (
-            <SystemHealthPage lag={lag} connected={connected} stats={stats} config={config} onSeed={handleSeedDemoData} seeding={seeding} />
-          )}
+          <div className="workspace-body">
+            <div className="container">
+              {page === "Transactions" && (
+                <LiveTransactionsPage txns={txns} alerts={alerts} config={config} onSelectTxn={(id) => setSelectedTxnId(id)} selectedTxnId={selectedTxnId} />
+              )}
+              {page === "Risk Intelligence" && (
+                <ReviewQueuePage txns={txns} alerts={alerts} config={config} onAction={handleAction} actionPending={actionPending} onSelectTxn={(id) => setSelectedTxnId(id)} />
+              )}
+              {page === "Alerts" && (
+                <BlockedPage txns={txns} alerts={alerts} config={config} stats={stats} />
+              )}
+              {page === "Analytics" && (
+                <AnalyticsPage stats={stats} txns={txns} alerts={alerts} config={config} />
+              )}
+              {page === "Accounts" && (
+                <AccountsPage balances={balances} />
+              )}
+              {page === "System Health" && (
+                <SystemHealthPage lag={lag} connected={connected} stats={stats} config={config} onSeed={handleSeedDemoData} seeding={seeding} />
+              )}
+            </div>
+          </div>
         </div>
       )}
 
-      <Footer />
+      <Footer onNav={goTo} />
 
       {selectedTxnId && selectedTxn && (
         <TransactionDrawer
