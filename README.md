@@ -1,7 +1,7 @@
 # LedgerStream — AI Payment Risk Manager
 
 > **Razorpay Track 02 Buildathon Submission**  
-> Active pre-settlement fraud prevention powered by Kafka, XGBoost, and PostgreSQL.
+> Active pre-settlement fraud prevention powered by Kafka, Random Forest V4, and PostgreSQL.
 
 ---
 
@@ -57,7 +57,7 @@ Transaction Event (JSON)
         ├── Feature extraction [amount, hour, velocity, log_amount, is_night, amount_ratio]
         │
         ▼
-  Fraud Risk Model (HistGradientBoosting)
+  Fraud Risk Model (Random Forest V4)
         │
         ▼
   Risk Decision Engine
@@ -103,11 +103,12 @@ Also:
 |---------|--------|
 | Kafka streaming ingestion | ✅ |
 | PostgreSQL ledger | ✅ |
-| XGBoost fraud detection (3 features) | ✅ |
+| Random Forest V4 fraud detection (6 features) | ✅ |
 | **Pre-settlement interception** | ✅ |
 | LOW → immediate settlement | ✅ |
 | MEDIUM → hold + analyst review | ✅ |
 | HIGH → instant block | ✅ |
+| Send Transaction simulator (real pipeline) | ✅ |
 | Analyst approve/decline API | ✅ |
 | Idempotency (duplicate-safe Kafka delivery) | ✅ |
 | `SELECT FOR UPDATE` row locking | ✅ |
@@ -116,15 +117,15 @@ Also:
 | Structured JSON logging | ✅ |
 | Environment configuration | ✅ |
 | State transition enforcement | ✅ |
-| 25 regression tests | ✅ |
+| 33 regression tests | ✅ |
 
 ---
 
 ## Safety Guarantees
 
-Verified by the 25-case automated regression suite:
+Verified by the 33-case automated regression suite:
 
-1. **LOW transactions settle correctly** — balances update exactly once
+1. **LOW transactions settle correctly** — balances update once (duplicate-safe)
 2. **MEDIUM transactions are held** — balances do NOT change before analyst approval
 3. **HIGH transactions are blocked** — balances are NEVER touched
 4. **Held → Applied only with explicit Approve** — state transition is guarded
@@ -134,21 +135,15 @@ Verified by the 25-case automated regression suite:
 8. **Duplicate Kafka delivery is idempotent** — same event, same result
 9. **Insufficient balance triggers rollback** — no partial debit
 10. **Concurrent approve+decline race resolves correctly** — exactly one wins
-11. **Database total balance is conserved** — $347,000.00 verified
+11. **Database total balance is conserved** — balance conservation verified by the regression suite
 
 ---
 
 ## Performance
 
-| Phase | Workload | Avg Latency | Notes |
-|-------|----------|-------------|-------|
-| Phase 1 (no ML) | 100 EPS | ~45 ms | Pure Kafka/Postgres |
-| Phase 2 (inline ML) | 100 EPS | ~16.98 s | Single-threaded sequential; ML overhead |
-| Phase 5/current | ~30 EPS | ~10.76 ms | Optimized single-thread loop |
+The ledger consumer is **sequential / single-threaded**. Demonstrated sustainable processing is around the tested operating range; higher producer rates can create Kafka backlog. Horizontal scaling through additional Kafka partitions and consumer instances is future work.
 
-**Maximum sequential throughput: ~93 EPS** at 10.76ms average latency.
-
-> The sequential single-threaded commit loop is a deliberate trade-off to guarantee transactional correctness (PostgreSQL commit → Kafka offset commit ordering). Horizontal scaling via Kafka partition assignment is the safe future path.
+> The single-threaded commit loop is a deliberate trade-off to guarantee transactional correctness (PostgreSQL commit → Kafka offset commit ordering).
 
 ---
 
@@ -211,14 +206,33 @@ http://localhost:5173
 
 ## Demo Scenarios
 
-Run deterministic demo transactions:
+Open the **Send Transaction** page for a live end-to-end demo:
 
-```powershell
+```
+From Account → To Account → Amount → Send Payment
+        ↓
+Kafka transaction topic → Python ledger consumer
+        ↓
+Feature calculation [amount, hour, velocity, log_amount, is_night, amount_ratio]
+        ↓
+Random Forest V4 → risk score → policy decision
+        ↓
+PostgreSQL → API → dashboard
+```
+
+The demo uses **synthetic transaction events** published through the real pipeline. Risk scores and decisions come from the actual backend model and are read back from the database — not a frontend simulation.
+
+- **LOW** → settlement may proceed (balances update)
+- **MEDIUM** → settlement held for analyst review (balances frozen); the analyst can approve or decline
+- **HIGH** → settlement blocked (balances untouched)
+
+Outcome scenarios exercised by the demo:
+
+```
 # Scenario 1: LOW risk → auto-settle
 # Scenario 2: MEDIUM risk → hold → approve
 # Scenario 3: MEDIUM risk → hold → decline
 # Scenario 4: HIGH risk → instant block
-powershell -File scripts/demo_scenario.ps1
 ```
 
 ---
@@ -233,8 +247,8 @@ python ../tests/regression_tests.py
 Expected:
 
 ```
-..........................
-Ran 25 tests in ~8s
+.................................
+Ran 33 tests — 33 passed, 0 failed, 0 skipped
 OK
 ```
 
@@ -256,25 +270,28 @@ RISK_HIGH_THRESHOLD=0.10
 
 ## Model Details
 
-- **Classifier**: HistGradientBoostingClassifier (scikit-learn)
+- **Classifier**: RandomForestClassifier — Random Forest V4 (scikit-learn)
 - **Training data**: Kaggle `creditcard.csv` (284,807 transactions, 492 fraudulent)
 - **Features**: `[amount, hour, velocity, log_amount, is_night, amount_ratio]` (6 features)
 - **Decision thresholds** (score-only, independent of amount):
   - score < 0.01 → LOW → APPROVE
-  - 0.01 ≤ score ≤ 0.10 → MEDIUM → VERIFY
-  - score > 0.10 → HIGH → HOLD/BLOCK
-- **Offline metrics** (held-out test set, 56,962 rows):
-  - AUC-PR: 0.0637
-  - Best F1: 0.1806 @ threshold 0.1018
-  - @0.10 threshold: precision 0.237, recall 0.143, 0.10% flagged
+  - 0.01 ≤ score ≤ 0.10 → MEDIUM → VERIFY / hold for review
+  - score > 0.10 → HIGH → BLOCK
+- **Held-out evaluation** (test set of 56,962 transactions; 98 positive fraud examples; ~0.172% fraud base rate):
+  - PR-AUC: 0.1131
+  - Precision @ 0.10 threshold: 26.9%
+  - Recall @ 0.10 threshold: 21.4%
+  - F1 @ 0.10 threshold: 23.9%
+
+Fraud is highly imbalanced (~0.172% of the held-out set), so PR-AUC, precision, and recall are more informative than raw accuracy.
 
 ---
 
 ## Limitations
 
-1. **Throughput**: Single-threaded sequential consumer caps at ~93 EPS. Higher throughput requires multi-partition Kafka assignment and multiple consumer instances.
-2. **Model features**: Only 3 features (amount, hour, velocity). Real-world models use richer signals (device fingerprint, IP reputation, merchant category, etc.).
-3. **Explainability**: Risk reasons are rule-based heuristics, not mathematical SHAP attributions.
+1. **Throughput**: The single-threaded consumer limits processing capacity; higher producer rates can create Kafka backlog. Horizontal scaling via additional Kafka partitions and consumer instances is future work.
+2. **Model features**: The model uses six engineered transaction/temporal features (`amount, hour, velocity, log_amount, is_night, amount_ratio`) rather than richer production signals (device fingerprint, IP reputation, merchant category, etc.).
+3. **Explainability**: Risk reasons shown in the UI are supporting rule-based signals, not SHAP attributions.
 4. **Horizontal scaling**: Not implemented (by design — adding concurrent consumers requires careful partition assignment to avoid duplicate processing).
 
 ---
