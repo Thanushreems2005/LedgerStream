@@ -7,6 +7,8 @@ import {
   fetchStats,
   fetchConfig,
   sendTransaction,
+  seedDemo,
+  transactionAction,
 } from "./api";
 
 const POLL_MS = 2500;
@@ -1511,13 +1513,7 @@ export default function App() {
     setSeeding(true);
     setDemo({ status: "processing", lastTxn: null, error: null });
     try {
-      const res = await fetch("/api/admin/seed-demo", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(count ? { count } : {}),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      await seedDemo(count);
 
       // Poll the existing transaction API until the new demo event has been
       // scored by the ML model, decided by the policy, and persisted to
@@ -1652,9 +1648,7 @@ export default function App() {
   async function handleAction(eventId, actionType) {
     setActionPending(true);
     try {
-      const res = await fetch(`/api/transactions/${eventId}/${actionType}`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      await transactionAction(eventId, actionType);
       addToast("success", `Transaction ${actionType === "approve" ? "approved and settled" : "declined"} successfully.`);
       setSelectedTxnId(null);
       await refreshData();

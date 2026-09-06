@@ -6,6 +6,16 @@ async function get(path) {
   return res.json();
 }
 
+async function post(path, body) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json();
+  if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
 
 export const fetchBalances = () => get("/balances");
 export const fetchTransactions = (limit = 50, range) => get(`/transactions?limit=${limit}${range ? `&range=${range}` : ""}`);
@@ -14,13 +24,14 @@ export const fetchLag = () => get("/lag");
 export const fetchStats = (range) => get(range ? `/stats?range=${range}` : "/stats");
 export const fetchConfig = () => get("/config");
 
-export async function sendTransaction({ from, to, amount }) {
-  const res = await fetch(`${API_BASE}/admin/send-transaction`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ from_account: from, to_account: to, amount }),
-  });
-  const data = await res.json();
-  if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  return data;
+export function sendTransaction({ from, to, amount }) {
+  return post("/admin/send-transaction", { from_account: from, to_account: to, amount });
+}
+
+export function seedDemo(count) {
+  return post("/admin/seed-demo", count ? { count } : {});
+}
+
+export function transactionAction(eventId, action) {
+  return post(`/transactions/${eventId}/${action}`);
 }
